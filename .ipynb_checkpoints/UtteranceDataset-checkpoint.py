@@ -19,7 +19,7 @@ class FrameDataset(Dataset):
         instance = torch.from_numpy(self.data[index])
         if self.test:
             return instance.float().to(DEVICE)
-        label_torch = torch.from_numpy(self.labels[index])
+        label_torch = torch.from_numpy(np.array(self.labels[index]))
         return instance.float().to(DEVICE), label_torch.to(DEVICE)
 
     # Override to give PyTorch size of dataset

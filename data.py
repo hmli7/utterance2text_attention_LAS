@@ -55,7 +55,7 @@ class Data():
     #         dataset = TensorDataset(torch.tensor(data, dtype=torch.float))
             dataset = UtteranceDataset.FrameDataset(data)
 
-        dataloader = DataLoader(dataset, shuffle=shuffle, batch_size=batch_size, drop_last=False)
+        dataloader = DataLoader(dataset, shuffle=shuffle, batch_size=batch_size, drop_last=False, collate_fn=self.collate_fn)
         
         return dataloader
 
@@ -86,3 +86,15 @@ class Data():
         lines = np.load(lang_path, encoding='bytes')
         lang = char_language_model.Lang('English Labels')
         return lang, lines
+    
+    @ staticmethod
+    def collate_fn(seq_list):
+        """Function put into dataloader to solve the various length issue
+        by default, dataloader will stack the batch of data into a tensor, which will cause error when sequence length is different"""
+        if len(seq_list[0])==2:
+            inputs, targets = zip(*seq_list)
+            return list(inputs), list(targets)
+        else:
+            return seq_list
+        # inputs = [item[0] for item in seq_list]
+        # targets = [item[1] for item in seq_list]

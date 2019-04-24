@@ -52,3 +52,8 @@ class Lang:
         except KeyError:
             print('There exists a char that is not in the corpus mapping')
         return indexes
+    
+    def indexes2string(self, indexes):
+        '''remove SOS, EOS tokens and decode indexes to string'''
+        decoded_string = ''.join([self.index2char[idx] for idx in indexes if idx not in [EOS_token, SOS_token]])
+        return decoded_string
