@@ -9,7 +9,7 @@ import numpy as np
 import config
 from util import *
 import paths
-
+#%%
 class LAS_utterance2text_baseline(nn.Module):
     '''https://arxiv.org/pdf/1602.02373.pdf lstm+global pooling'''
     def __init__(self, vocab_size, embed_size, hidden_size, output_dim, nlayers, bidirectional, lstm_dropout, dropout1,dropout2, dropout3, pad_idx, train_embedding=True):
