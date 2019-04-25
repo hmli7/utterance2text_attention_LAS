@@ -15,8 +15,10 @@ from util import *
 import paths
 import char_language_model
 
+import pdb
 
-def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_epoch, best_vali_loss, DEVICE, scheduler=None, start_epoch=None, model_prefix=config.model_prefix):
+
+def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_epoch, best_vali_loss, DEVICE, TEACHER_FORCING_Ratio=1, scheduler=None, start_epoch=None, model_prefix=config.model_prefix):
     best_eval = None
     start_epoch = 0 if start_epoch is None else start_epoch
     max_epoch = config.max_epoch
@@ -41,7 +43,7 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_ep
         for idx, (data_batch, label_batch) in enumerate(train_dataloader):
             optimizer.zero_grad()
             predictions, sorted_labels, labels_lens, _ = model(
-                (data_batch, label_batch), TEACHER_FORCING_Ratio=0, TEST=False)  # N, max_label_L, vocab_size; N, max_label_L
+                (data_batch, label_batch), TEACHER_FORCING_Ratio=1, TEST=False)  # N, max_label_L, vocab_size; N, max_label_L
 
             # mask for cross entropy loss
             batch_size, max_label_lens, _ = predictions.size()
@@ -51,8 +53,12 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_ep
                 (1, max_label_lens), length).squeeze(0) for length in labels_lens]).int()
             # use cross entropy loss, assume set (reduce = False)
             batch_loss = criterion.forward(predictions.permute(0,2,1), sorted_labels) #(N,C,d1) & (N,d1)
+            print('batch_loss_sum', batch_loss.sum())
+#             pdb.set_trace()
             batch_loss = batch_loss * prediction_mask.float().to(DEVICE) # float for matrix mul
             loss = batch_loss.sum()/prediction_mask.sum()
+            print('batch_loss_sum', batch_loss.sum())
+            print('prediction_mask', prediction_mask.sum())
             print('loss', loss)
 
             loss.backward()

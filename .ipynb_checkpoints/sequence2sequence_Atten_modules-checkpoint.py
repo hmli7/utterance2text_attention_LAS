@@ -11,7 +11,6 @@ import util
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-
 # TODO:
 # 1. teacher forcing
 # 2. how to mask to loss
@@ -133,7 +132,7 @@ class Decoder_RNN(nn.Module):
 
         # for transcripts
         self.embedding = nn.Embedding(
-            self.vocab_size+1, self.embed_size, padding_idx=self.padding_value) # vocab_size + 1 for <padding value>
+            self.vocab_size+1, self.embed_size) # , padding_idx=self.padding_value vocab_size + 1 for <padding value>; using index of <EOS> to pad
 
         # rnn cells
         self.rnns = nn.ModuleList()
@@ -203,7 +202,7 @@ class Decoder_RNN(nn.Module):
                     (y_hat_t_embedding, attention_context), dim=1)
             else:
                 rnn_input = torch.cat(
-                    (labels_embedding[:, time_index, :], attention_context), dim=1)
+                    (labels_embedding[time_index, :, :], attention_context), dim=1)
 
             # rnn
             hidden_states[0], memory_states[0] = self.rnns[0](
@@ -219,7 +218,8 @@ class Decoder_RNN(nn.Module):
             # apply attention to generate context
             attention_softmax_energy = self.attention(key, rnn_output.unsqueeze(1)) # N, key_len, query_len
             masked_softmax_energy = torch.mul(attention_softmax_energy, key_mask[:, :, time_index].unsqueeze(2)) # N, key_len, 1
-            masked_softmax_energy = masked_softmax_energy/masked_softmax_energy.sum(dim=1, keepdim=True) # normalize key_time_len dimension by devided by sum
+            masked_softmax_energy = F.normalize(masked_softmax_energy, p=1, dim=1)
+#             masked_softmax_energy = masked_softmax_energy/masked_softmax_energy.sum(dim=1, keepdim=True) # normalize key_time_len dimension by devided by sum
             # N, key_len, query_len * N, key_len, key_size
             attention_context = torch.bmm(masked_softmax_energy.permute(0,2,1), value) # N, 1, key_len * N, key_len, key_size => N, 1, key_size
             attention_context = attention_context.squeeze(1) # N, key_len
@@ -229,7 +229,7 @@ class Decoder_RNN(nn.Module):
             attentions.append(masked_softmax_energy.detach())
             
             y_hat_t_label = torch.argmax(y_hat_t, dim=1).long() # N ; long tensor for embedding inputs
-            y_hat_label.append(y_hat_t_label.detach().item().cpu())
+            y_hat_label.append(y_hat_t_label.detach().cpu())
         # concat predictions
         y_hat = torch.stack(y_hat, dim=1) # N, label_L, vocab_size
         if TEST:
