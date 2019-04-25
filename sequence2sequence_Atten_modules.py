@@ -11,10 +11,6 @@ import util
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# TODO:
-# 1. teacher forcing
-# 2. how to mask to loss
-# 3. how to loss
 
 class Encoder_RNN(nn.Module):
     def __init__(self, embed_size, hidden_size, n_layers, n_plstm, mlp_hidden_size, mlp_output_size):
@@ -128,7 +124,7 @@ class Decoder_RNN(nn.Module):
         self.vocab_size = vocab_size
         self.padding_value = padding_value
 
-        assert self.hidden_size == self.key_value_size # when calculating attention score, we need key_value_size equals to rnn output size
+#         assert self.hidden_size == self.key_value_size # when calculating attention score, we need key_value_size equals to rnn output size
 
         # for transcripts
         self.embedding = nn.Embedding(
@@ -142,10 +138,12 @@ class Decoder_RNN(nn.Module):
             self.rnns.append(nn.LSTMCell(self.hidden_size, self.hidden_size))
 
         self.attention = Attention()
+        
+        # fc layer to map demention of query with dimention of key and value
+        self.fc = nn.Linear(self.hidden_size, self.key_value_size)
 
         # fc layer
-        self.mlp = MLP(self.hidden_size+self.key_value_size,
-                       mlp_hidden_size, self.vocab_size)
+        self.mlp = MLP(self.key_value_size*2,mlp_hidden_size, self.vocab_size)
 
     def forward(self, argument_list):
         key, value, labels, final_seq_lens, seq_order, reversed_seq_order, SOS_token, TEACHER_FORCING_Ratio, TEST = argument_list
@@ -160,8 +158,7 @@ class Decoder_RNN(nn.Module):
 
         # ------ Init ------
         # initialize attention, hidden states, memory states
-        attention_context = self.init_states(
-            key, hidden_size=key.size(2))  # N, Key/query_len
+        attention_context = self.init_states(key, hidden_size=key.size(2))  # N, Key/query_len
         # initialize hidden and memory states
         hidden_states = [self.init_states(key)]  # N, hidden_size
         memory_states = [self.init_states(key)]  # N, hidden_size
@@ -182,8 +179,9 @@ class Decoder_RNN(nn.Module):
         key_lens = torch.stack(
             [torch.full((1, max_len), length).squeeze(0) for length in final_seq_lens]).int()
         key_mask = key_mask < key_lens  # a matrix of 1 & 0; N, max_key_len
-        key_mask = key_mask.unsqueeze(2).repeat(
-            (1, 1, max_label_len)).float().to(DEVICE)  # expend to N, max_key_len, max_label_len; float for matrix mul when applying attention
+#         key_mask = key_mask.unsqueeze(2).repeat(
+#             (1, 1, max_label_len)).float().to(DEVICE)  # expend to N, max_key_len, max_label_len; float for matrix mul when applying attention
+        key_mask = key_mask.unsqueeze(2).float().to(DEVICE) # N, max_key_len, 1
 
         # ------ LAS ------
         # initialze for the first time step input
@@ -214,28 +212,35 @@ class Decoder_RNN(nn.Module):
                     hidden_states[hidden_layer - 1], (hidden_states[hidden_layer], memory_states[hidden_layer])
                 )
             rnn_output = hidden_states[-1]  # N, hidden_size
+            
+            query = self.fc(rnn_output.unsqueeze(1)) # N, query_len, key_value_size
 
             # apply attention to generate context
-            attention_softmax_energy = self.attention(key, rnn_output.unsqueeze(1)) # N, key_len, query_len
-            masked_softmax_energy = torch.mul(attention_softmax_energy, key_mask[:, :, time_index].unsqueeze(2)) # N, key_len, 1
+            attention_softmax_energy = self.attention(key, query) # N, key_len, query_len
+#             masked_softmax_energy = torch.mul(attention_softmax_energy, key_mask[:, :, time_index].unsqueeze(2)) # N, key_len, 1
+#             masked_softmax_energy = attention_softmax_energy * key_mask[:, :, time_index].unsqueeze(2)
+            masked_softmax_energy = attention_softmax_energy * key_mask
             masked_softmax_energy = F.normalize(masked_softmax_energy, p=1, dim=1)
 #             masked_softmax_energy = masked_softmax_energy/masked_softmax_energy.sum(dim=1, keepdim=True) # normalize key_time_len dimension by devided by sum
             # N, key_len, query_len * N, key_len, key_size
             attention_context = torch.bmm(masked_softmax_energy.permute(0,2,1), value) # N, 1, key_len * N, key_len, key_size => N, 1, key_size
             attention_context = attention_context.squeeze(1) # N, key_len
 
-            y_hat_t = self.mlp(torch.cat((rnn_output, attention_context), dim=1)) # N, vocab_size
+            y_hat_t = self.mlp(torch.cat((query.squeeze(1), attention_context), dim=1)) # N, vocab_size
             y_hat.append(y_hat_t) # N, vocab_size
             attentions.append(masked_softmax_energy.detach())
             
             y_hat_t_label = torch.argmax(y_hat_t, dim=1).long() # N ; long tensor for embedding inputs
             y_hat_label.append(y_hat_t_label.detach().cpu())
+            
         # concat predictions
         y_hat = torch.stack(y_hat, dim=1) # N, label_L, vocab_size
+        attentions = torch.cat(attentions, dim=2) # N, key_len, query_len
+        y_hat_label = torch.stack(y_hat_label, dim=1) # N, label_L
+        
         if TEST:
-            attentions = torch.cat(attentions, dim=2) # N, key_len, query_len
-            return y_hat_label, labels_padded.permute(1,0).detach().cpu(), labels_lens, attentions
-        return y_hat, labels_padded.permute(1,0), labels_lens, attentions
+            return y_hat_label, labels_padded.permute(1,0).detach().cpu(), labels_lens, attentions, masked_softmax_energy,key_mask
+        return y_hat, y_hat_label,labels_padded.permute(1,0), labels_lens, attentions
 
     def init_states(self, source_outputs, hidden_size=None):
         """initiate state using source outputs and hidden size"""
@@ -259,8 +264,8 @@ class Sequence2Sequence(nn.Module):
         keys, values, labels, final_seq_lens, sequence_order, reverse_sequence_order = self.encoder(
             seq_batch)
         argument_list = [keys, values, labels, final_seq_lens, sequence_order,reverse_sequence_order, char_language_model.SOS_token, TEACHER_FORCING_Ratio, TEST]
-        y_hat, labels_padded, labels_lens, attentions = self.decoder(argument_list)
+        y_hat, y_hat_labels, labels_padded, labels_lens, attentions = self.decoder(argument_list)
         if TEST:
             pass
             # unsort y_hat and labels
-        return y_hat, labels_padded, labels_lens, attentions
+        return y_hat, y_hat_labels, labels_padded, labels_lens, attentions
