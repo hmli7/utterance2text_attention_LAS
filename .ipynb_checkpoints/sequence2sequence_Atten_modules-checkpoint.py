@@ -24,8 +24,10 @@ class Encoder_RNN(nn.Module):
         for i in range(n_plstm):
             # add plstm layers
             self.rnns.append(pBLSTM(hidden_size*2, hidden_size))
-        self.mlp1 = MLP(hidden_size*2, mlp_hidden_size, mlp_output_size)
-        self.mlp2 = MLP(hidden_size*2, mlp_hidden_size, mlp_output_size)
+#         self.mlp1 = MLP(hidden_size*2, mlp_hidden_size, mlp_output_size)
+#         self.mlp2 = MLP(hidden_size*2, mlp_hidden_size, mlp_output_size)
+        self.fc1 = nn.Linear(hidden_size*2, mlp_output_size)
+        self.fc2 = nn.Linear(hidden_size*2, mlp_output_size)
 
     def forward(self, input_sequences):
         # x: N, L, E
@@ -45,8 +47,8 @@ class Encoder_RNN(nn.Module):
             x, _ = rnn(x)  # L/8, B, hidden_size * 2
         # unpack
         x, final_seq_lens = pad_packed_sequence(x)
-        keys = self.mlp1(x.permute(1, 0, 2))
-        values = self.mlp2(x.permute(1, 0, 2))
+        keys = self.fc1(x.permute(1, 0, 2))
+        values = self.fc2(x.permute(1, 0, 2))
         return keys, values, labels, final_seq_lens, sequence_order, reverse_sequence_order
 
 
@@ -70,10 +72,10 @@ class pBLSTM(nn.Module):
         # reduce the timestep by 2
         x = x.permute(1, 0, 2)  # L, B, F -> B, L, F
         x = x.contiguous().view(batch_size, int(seq_length//2), feature_dim*2)  # B, L/2, F*2
-        # pad
-        x = pad_sequence(x)
+#         # pad
+#         x = pad_sequence(x)
         # pack
-        x = pack_padded_sequence(x, sorted_sequence_lens)
+        x = pack_padded_sequence(x.permute(1,0,2), sorted_sequence_lens)
         return self.lstm(x)
 
 
@@ -143,8 +145,8 @@ class Decoder_RNN(nn.Module):
         self.fc = nn.Linear(self.hidden_size, self.key_value_size)
 
         # fc layer
-        self.mlp = MLP(self.key_value_size*2,mlp_hidden_size, self.vocab_size)
-
+#         self.mlp = MLP(self.key_value_size*2, mlp_hidden_size, self.vocab_size)
+        self.fc2 = nn.Linear(self.key_value_size*2, self.vocab_size)
     def forward(self, argument_list):
         key, value, labels, final_seq_lens, seq_order, reversed_seq_order, SOS_token, TEACHER_FORCING_Ratio, TEST = argument_list
         # labels have been sorted by seq_order
@@ -154,7 +156,7 @@ class Decoder_RNN(nn.Module):
         # sorted N, Label L; use -1 to pad, this will be initialized to zero in embedding
         labels_padded = pad_sequence(labels, padding_value=self.padding_value)
         # embedding
-        labels_embedding = self.embedding(labels_padded)  # N, label L, emb
+        labels_embedding = self.embedding(labels_padded)  # label L, N, emb
 
         # ------ Init ------
         # initialize attention, hidden states, memory states
@@ -174,13 +176,14 @@ class Decoder_RNN(nn.Module):
         
         # query_mask, (0, max_length)
         batch_size, max_len = key.size(0), key.size(1)
-        key_mask = torch.stack([torch.arange(0, max_len)
-                                for i in range(batch_size)]).int()
-        key_lens = torch.stack(
-            [torch.full((1, max_len), length).squeeze(0) for length in final_seq_lens]).int()
-        key_mask = key_mask < key_lens  # a matrix of 1 & 0; N, max_key_len
+#         key_mask = torch.stack([torch.arange(0, max_len)
+#                                 for i in range(batch_size)]).int()
+#         key_lens = torch.stack(
+#             [torch.full((1, max_len), length).squeeze(0) for length in final_seq_lens]).int()
+#         key_mask = key_mask < key_lens  # a matrix of 1 & 0; N, max_key_len
 #         key_mask = key_mask.unsqueeze(2).repeat(
 #             (1, 1, max_label_len)).float().to(DEVICE)  # expend to N, max_key_len, max_label_len; float for matrix mul when applying attention
+        key_mask = torch.arange(0, max_len) < final_seq_lens.view(len(final_seq_lens),-1)
         key_mask = key_mask.unsqueeze(2).float().to(DEVICE) # N, max_key_len, 1
 
         # ------ LAS ------
@@ -226,9 +229,10 @@ class Decoder_RNN(nn.Module):
             attention_context = torch.bmm(masked_softmax_energy.permute(0,2,1), value) # N, 1, key_len * N, key_len, key_size => N, 1, key_size
             attention_context = attention_context.squeeze(1) # N, key_len
 
-            y_hat_t = self.mlp(torch.cat((query.squeeze(1), attention_context), dim=1)) # N, vocab_size
+#             y_hat_t = self.mlp(torch.cat((query.squeeze(1), attention_context), dim=1)) # N, vocab_size
+            y_hat_t = self.fc2(torch.cat((query.squeeze(1), attention_context), dim=1)) # N, vocab_size
             y_hat.append(y_hat_t) # N, vocab_size
-            attentions.append(masked_softmax_energy.detach())
+            attentions.append(masked_softmax_energy.detach().cpu())
             
             y_hat_t_label = torch.argmax(y_hat_t, dim=1).long() # N ; long tensor for embedding inputs
             y_hat_label.append(y_hat_t_label.detach().cpu())
@@ -240,7 +244,7 @@ class Decoder_RNN(nn.Module):
         
         if TEST:
             return y_hat_label, labels_padded.permute(1,0).detach().cpu(), labels_lens, attentions, masked_softmax_energy,key_mask
-        return y_hat, y_hat_label,labels_padded.permute(1,0), labels_lens, attentions
+        return y_hat, y_hat_label,labels_padded.permute(1,0).detach().cpu(), labels_lens, attentions
 
     def init_states(self, source_outputs, hidden_size=None):
         """initiate state using source outputs and hidden size"""

@@ -27,7 +27,7 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, languag
     batch_size = config.batch_size
 
     model = model.to(DEVICE)
-    criterion.to(DEVICE)
+    criterion = criterion.to(DEVICE)
 
     if scheduler is not None:
         print('-- Starting training with scheduler.')
@@ -41,6 +41,7 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, languag
 
         avg_loss = 0
         avg_distance = 0
+        avg_perplexity = 0
         num_batches = len(train_dataloader)
         # lists, presorted, preloaded on GPU
         for idx, (data_batch, label_batch) in enumerate(train_dataloader):
@@ -50,18 +51,16 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, languag
 
             # mask for cross entropy loss
             batch_size, max_label_lens, _ = predictions.size()
-            prediction_mask = torch.stack(
-                [torch.arange(0, max_label_lens) for i in range(batch_size)]).int()
-            prediction_mask = prediction_mask < torch.stack([torch.full(
-                (1, max_label_lens), length).squeeze(0) for length in labels_lens]).int()
+#             prediction_mask = torch.stack([torch.arange(0, max_label_lens) for i in range(batch_size)]).int()
+#             prediction_mask = prediction_mask < torch.stack([torch.full(
+#                 (1, max_label_lens), length).squeeze(0) for length in labels_lens]).int()
+            prediction_mask = torch.arange(0, max_label_lens) < torch.tensor(labels_lens).view(len(labels_lens),-1)
             # use cross entropy loss, assume set (reduce = False)
-            batch_loss = criterion.forward(predictions.permute(0,2,1), sorted_labels) #(N,C,d1) & (N,d1)
+            batch_loss = criterion.forward(predictions.permute(0,2,1), sorted_labels.to(DEVICE)) #(N,C,d1) & (N,d1)
 #             pdb.set_trace()
             batch_loss = batch_loss * prediction_mask.float().to(DEVICE) # float for matrix mul
-            loss = batch_loss.sum()/batch_size
-#             print('batch_loss_sum', batch_loss.sum())
-#             print('prediction_mask', prediction_mask.sum())
-#             print('loss', loss)
+            loss = batch_loss.sum()/batch_size # loss per instance used for train
+            perplexity_loss = torch.exp(batch_loss.sum()/prediction_mask.float().sum()).detach().cpu() # perplexity
             
             # distance
             distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), sorted_labels.detach().cpu().numpy(), labels_lens, language_model)
@@ -70,8 +69,12 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, languag
 
             loss.backward()
             optimizer.step()
-            avg_loss += loss.item()
+            avg_loss += loss.detach().cpu().item()
             avg_distance += distance
+            avg_perplexity += perplexity_loss
+            
+            if idx == 0:
+                plot_grad_flow_simple(model.named_parameters(), epoch, paths.gradient_path)
             
             if idx % 50 == 49:
                 # plot gradients
@@ -80,18 +83,22 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, languag
                 plot_single_attention(batch_attention[0].squeeze(0).cpu().numpy(), epoch, paths.attention_path)
 
             if idx % 100 == 99:
-                print_file_and_screen('Epoch: {}\tBatch: {}\tAvg-Loss: {:.4f}\tAvg-Distance: {:.4f}'.format(
-                    epoch, idx+1, avg_loss/100, avg_distance/100), f=f)
+                print_file_and_screen('Epoch: {}\tBatch: {}\tAvg-Loss: {:.4f}\tAvg-Perplexity: {:.4f}\tAvg-Distance: {:.4f}'.format(
+                    epoch, idx+1, avg_loss/100, avg_perplexity/100, avg_distance/100), f=f)
                 avg_loss = 0.0
                 avg_distance = 0.0
+                avg_perplexity = 0.0
                 
             # clear memory
-            torch.cuda.empty_cache()
             data_batch = [data.detach() for data in data_batch]
             label_batch = [label.detach() for label in label_batch]
+            predictions = predictions.detach()
             loss = loss.detach()
+            batch_loss = batch_loss.detach()
             del data_batch, label_batch
-            del loss
+            del predictions
+            del loss, batch_loss
+            torch.cuda.empty_cache()
 
         train_loss, train_distance = test_validation(
             model, criterion, train_dataloader, language_model, DEVICE)
@@ -136,36 +143,48 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, languag
 
 
 def test_validation(model, criterion, valid_dataloader, language_model, DEVICE):
+    print('## Start testing....')
     model.eval()
     num_batches = len(valid_dataloader)
     avg_loss = 0.0
     avg_distance = 0.0
+    avg_perplexity = 0.0
     for idx,  (data_batch, label_batch) in enumerate(valid_dataloader):
         predictions, prediction_labels, sorted_labels, labels_lens, _ = model(
-            (data_batch, label_batch), TEACHER_FORCING_Ratio=1, TEST=False)  # N, max_label_L, vocab_size; N, max_label_L
+            (data_batch, label_batch), TEACHER_FORCING_Ratio=0, TEST=False)  # N, max_label_L, vocab_size; N, max_label_L
         
         # mask for cross entropy loss
         batch_size, max_label_lens, _ = predictions.size()
-        prediction_mask = torch.stack(
-            [torch.arange(0, max_label_lens) for i in range(batch_size)]).int()
-        prediction_mask = prediction_mask < torch.stack([torch.full(
-            (1, max_label_lens), length).squeeze(0) for length in labels_lens]).int()
+#         prediction_mask = torch.stack(
+#             [torch.arange(0, max_label_lens) for i in range(batch_size)]).int()
+#         prediction_mask = prediction_mask < torch.stack([torch.full(
+#             (1, max_label_lens), length).squeeze(0) for length in labels_lens]).int()
+        prediction_mask = torch.arange(0, max_label_lens) < torch.tensor(labels_lens).view(len(labels_lens),-1)
         # use cross entropy loss, assume set (reduce = False)
-        batch_loss = criterion.forward(predictions.permute(0,2,1), sorted_labels) #(N,C,d1) & (N,d1)
+        batch_loss = criterion.forward(predictions.permute(0,2,1), sorted_labels.to(DEVICE)) #(N,C,d1) & (N,d1)
         batch_loss = batch_loss * prediction_mask.float().to(DEVICE) # float for matrix mul
-        loss = batch_loss.sum()/prediction_mask.sum()
+        loss = batch_loss.sum()/batch_size # loss per instance used for train
+        perplexity_loss = torch.exp(batch_loss.sum()/prediction_mask.float().sum()).detach().cpu() # perplexity
         
         distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), sorted_labels.detach().cpu().numpy(), labels_lens, language_model)
-#         # clear memory
-#         torch.cuda.empty_cache()
-#         data_batch = [data.detach() for data in data_batch]
-#         label_batch = [label.detach() for label in label_batch]
-#         loss = loss.detach()
-#         del data_batch, label_batch
-#         del loss
-        avg_loss += loss
+        
+        avg_loss += loss.detach().cpu().item()
         avg_distance += distance
-    return avg_loss/num_batches, avg_distance/num_batches
+        avg_perplexity += perplexity_loss
+        
+        # clear memory
+        data_batch = [data.detach() for data in data_batch]
+        label_batch = [label.detach() for label in label_batch]
+        predictions = predictions.detach()
+        loss = loss.detach()
+        batch_loss = batch_loss.detach()
+        del data_batch, label_batch
+        del predictions
+        del loss, batch_loss, perplexity_loss
+        torch.cuda.empty_cache()
+        
+    print('num_batches','last index',num_batches, idx)
+    return avg_loss/num_batches, avg_distance/num_batches, avg_perplexity/num_batches
 
 
 def predict(model, test_dataloader, DEVICE):
@@ -189,6 +208,7 @@ def evaluate_distance(predictions, padded_label, label_lens, lang):
     """ predictions: N, Max_len
         padded_labels: N, Max_len
         label_lens: N, len"""
+    prediction_checker = []
     ls = 0.0
     for i in range(predictions.shape[0]): # for each instance
         if char_language_model.EOS_token in predictions[i]: # there exists EOS, use the first 1 as the end of sentence
@@ -200,11 +220,13 @@ def evaluate_distance(predictions, padded_label, label_lens, lang):
         else:
             pred = predictions[i] # if no EOS, use the entire prediction
         
-        true = padded_label[i][:label_lens[i]-1]
+        true = padded_label[i][:label_lens[i]]
         pred = lang.indexes2string(pred)
         true = lang.indexes2string(true)
-        #print("Pred: {}, True: {}".format(pred, true))
         ls += L.distance(pred, true)
+        if i == 0:
+            prediction_checker.extend([pred, true])
+    print("Pred: {}, True: {}".format(prediction_checker[0], prediction_checker[1]))
     return ls / predictions.shape[0]
 
 def evaluate(encoder, decoder, lang, utterance, transcript, TEACHER_FORCING_Ratio=0):
