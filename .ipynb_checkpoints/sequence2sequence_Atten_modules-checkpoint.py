@@ -47,8 +47,8 @@ class Encoder_RNN(nn.Module):
             x, _ = rnn(x)  # L/8, B, hidden_size * 2
         # unpack
         x, final_seq_lens = pad_packed_sequence(x)
-        keys = self.fc1(x.permute(1, 0, 2))
-        values = self.fc2(x.permute(1, 0, 2))
+        keys = F.leaky_relu(self.fc1(x.permute(1, 0, 2)), negative_slope=0.2, inplace=True)
+        values = F.leaky_relu(self.fc2(x.permute(1, 0, 2)), negative_slope=0.2, inplace=True)
         return keys, values, labels, final_seq_lens, sequence_order, reverse_sequence_order
 
 
@@ -103,16 +103,27 @@ class Attention(nn.Module):
     def __init__(self):
         super(Attention, self).__init__()
 
-    def forward(self, key, query):
+    def forward(self, key, query, key_mask):
         # (N, key length , dimension)  (N, query_len, dimensions)
         energy = self.score(key, query)
-        # normalize
-        attention = F.softmax(energy, dim=1)# apply softmax on key time len
-        return attention
+        
+        #---softmax before masking
+#         # normalize
+#         attention_softmax_energy = F.softmax(energy, dim=1)# apply softmax on key time len
+# #             masked_softmax_energy = torch.mul(attention_softmax_energy, key_mask[:, :, time_index].unsqueeze(2)) # N, key_len, 1
+# #             masked_softmax_energy = attention_softmax_energy * key_mask[:, :, time_index].unsqueeze(2)
+#         masked_softmax_energy = attention_softmax_energy * key_mask
+#         masked_softmax_energy = F.normalize(masked_softmax_energy, p=1, dim=1)
+# #             masked_softmax_energy = masked_softmax_energy/masked_softmax_energy.sum(dim=1, keepdim=True) # normalize key_time_len dimension by devided by sum
+
+        #----softmax after masking
+        masked_energy = energy * key_mask
+        masked_softmax_energy = F.softmax(masked_energy, dim=1)
+        return masked_softmax_energy
 
     def score(self, key, query):
         # use dot product
-        energy = torch.bmm(key, query.transpose(1, 2).contiguous())  # B, key_len, query_len
+        energy = torch.bmm(key, query.permute(0,2,1))  # B, key_len, query_len
         return energy
 
 
@@ -145,8 +156,8 @@ class Decoder_RNN(nn.Module):
         self.fc = nn.Linear(self.hidden_size, self.key_value_size)
 
         # fc layer
-#         self.mlp = MLP(self.key_value_size*2, mlp_hidden_size, self.vocab_size)
-        self.fc2 = nn.Linear(self.key_value_size*2, self.vocab_size)
+        self.mlp = MLP(self.key_value_size*2, mlp_hidden_size, self.vocab_size)
+#         self.fc2 = nn.Linear(self.key_value_size*2, self.vocab_size)
     def forward(self, argument_list):
         key, value, labels, final_seq_lens, seq_order, reversed_seq_order, SOS_token, TEACHER_FORCING_Ratio, TEST = argument_list
         # labels have been sorted by seq_order
@@ -185,6 +196,7 @@ class Decoder_RNN(nn.Module):
 #             (1, 1, max_label_len)).float().to(DEVICE)  # expend to N, max_key_len, max_label_len; float for matrix mul when applying attention
         key_mask = torch.arange(0, max_len) < final_seq_lens.view(len(final_seq_lens),-1)
         key_mask = key_mask.unsqueeze(2).float().to(DEVICE) # N, max_key_len, 1
+        key_mask.requires_grad = False
 
         # ------ LAS ------
         # initialze for the first time step input
@@ -219,18 +231,14 @@ class Decoder_RNN(nn.Module):
             query = self.fc(rnn_output.unsqueeze(1)) # N, query_len, key_value_size
 
             # apply attention to generate context
-            attention_softmax_energy = self.attention(key, query) # N, key_len, query_len
-#             masked_softmax_energy = torch.mul(attention_softmax_energy, key_mask[:, :, time_index].unsqueeze(2)) # N, key_len, 1
-#             masked_softmax_energy = attention_softmax_energy * key_mask[:, :, time_index].unsqueeze(2)
-            masked_softmax_energy = attention_softmax_energy * key_mask
-            masked_softmax_energy = F.normalize(masked_softmax_energy, p=1, dim=1)
-#             masked_softmax_energy = masked_softmax_energy/masked_softmax_energy.sum(dim=1, keepdim=True) # normalize key_time_len dimension by devided by sum
+            masked_softmax_energy = self.attention(key, query, key_mask) # N, key_len, query_len
+
             # N, key_len, query_len * N, key_len, key_size
             attention_context = torch.bmm(masked_softmax_energy.permute(0,2,1), value) # N, 1, key_len * N, key_len, key_size => N, 1, key_size
             attention_context = attention_context.squeeze(1) # N, key_len
 
-#             y_hat_t = self.mlp(torch.cat((query.squeeze(1), attention_context), dim=1)) # N, vocab_size
-            y_hat_t = self.fc2(torch.cat((query.squeeze(1), attention_context), dim=1)) # N, vocab_size
+            y_hat_t = self.mlp(torch.cat((query.squeeze(1), attention_context), dim=1)) # N, vocab_size
+#             y_hat_t = self.fc2(torch.cat((query.squeeze(1), attention_context), dim=1)) # N, vocab_size
             y_hat.append(y_hat_t) # N, vocab_size
             attentions.append(masked_softmax_energy.detach().cpu())
             
@@ -264,7 +272,7 @@ class Sequence2Sequence(nn.Module):
         self.decoder = Decoder_RNN(
             decoder_vocab_size, decoder_embed_size, mlp_output_size, decoder_hidden_size, decoder_n_layers, decoder_mlp_hidden_size, decoder_padding_value)
 
-    def forward(self, seq_batch, TEACHER_FORCING_Ratio=0, TEST=False):
+    def forward(self, seq_batch, TEACHER_FORCING_Ratio=1, TEST=False):
         keys, values, labels, final_seq_lens, sequence_order, reverse_sequence_order = self.encoder(
             seq_batch)
         argument_list = [keys, values, labels, final_seq_lens, sequence_order,reverse_sequence_order, char_language_model.SOS_token, TEACHER_FORCING_Ratio, TEST]
