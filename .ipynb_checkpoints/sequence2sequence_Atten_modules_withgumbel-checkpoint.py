@@ -684,6 +684,8 @@ class Sequence2Sequence(nn.Module):
     def __init__(self, embed_size, hidden_size, n_layers, n_plstm, mlp_hidden_size, mlp_output_size,
                  decoder_vocab_size, decoder_embed_size, decoder_hidden_size, decoder_n_layers, decoder_mlp_hidden_size, decoder_padding_value, GRUMBEL_SOFTMAX=False):
         super(Sequence2Sequence, self).__init__()
+        
+        self.decoder_padding_value = decoder_padding_value
 
         self.encoder = Encoder_RNN(
             embed_size, hidden_size, n_layers, n_plstm, mlp_hidden_size, mlp_output_size)
@@ -715,7 +717,11 @@ class Sequence2Sequence(nn.Module):
                              reverse_sequence_order, char_language_model.SOS_token, char_language_model.EOS_token, MAX_SEQ_LEN, SEARCH_MODE]
             y_hat, y_hat_labels, attentions = self.decoder.inference(argument_list)
             labels_lens = [len(label) for label in labels]
-            return y_hat, y_hat_labels, labels, labels_lens, attentions
+            # pad
+            # sorted N, Label L; use -1 to pad, this will be initialized to zero in embedding
+            labels_padded = pad_sequence(labels, padding_value=self.decoder_padding_value).permute(1,0) # N, L
+            labels_padded.requires_grad=False
+            return y_hat, y_hat_labels, labels_padded, labels_lens, attentions
         
         else:
             assert TEST == False and VALIDATE == False
