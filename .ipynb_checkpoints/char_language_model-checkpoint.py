@@ -44,8 +44,8 @@ class Lang:
         return ' '.join(map(lambda x: x.decode('utf-8'), line))
     
     def string2indexes(self, line_string):
-        '''encode a line string to indexes, add SOS, EOS'''
-        indexes = [SOS_token]
+        '''encode a line string to indexes, add EOS'''
+        indexes = []
         try:
             indexes.extend([self.char2index[char] for char in line_string])
             indexes.append(EOS_token)

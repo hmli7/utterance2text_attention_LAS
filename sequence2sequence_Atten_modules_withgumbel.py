@@ -174,6 +174,7 @@ class Attention(nn.Module):
 #         # pad
 #         # sorted N, Label L; use -1 to pad, this will be initialized to zero in embedding
 #         labels_padded = pad_sequence(labels, padding_value=self.padding_value)
+#         labels_padded.requires_grad = False
 #         # embedding
 #         labels_embedding = self.embedding(labels_padded)  # label L, N, emb
 
@@ -258,7 +259,7 @@ class Attention(nn.Module):
 #         attentions = torch.cat(attentions, dim=2) # N, key_len, query_len
 #         y_hat_label = torch.stack(y_hat_label, dim=1) # N, label_L
         
-#         return y_hat, y_hat_label, labels_padded.permute(1,0).detach().cpu(), labels_lens, attentions
+#         return y_hat, y_hat_label, labels_padded.permute(1,0), labels_lens, attentions
     
 #     def inference(self, argument_list):
 #         """ when tesing"""
@@ -299,6 +300,7 @@ class Attention(nn.Module):
 #         y_hat = []
 #         y_hat_label = []
 #         attentions = []
+#         finished_instances = []
 #         # iterate through max possible label length
 #         for time_index in range(max_label_len):
 #             # decoding rnn
@@ -341,9 +343,12 @@ class Attention(nn.Module):
 #                 NotImplemented
 #             y_hat_label.append(y_hat_t_label.detach().cpu())
 
-#             if y_hat_t_label == EOS_token: # inferencing meet the end token, stop
-#                 break
-            
+#             if EOS_token in y_hat_t_label: # if some one ended
+#                 finished_instances.extend((y_hat_t_label == EOS_token).nonzero().squeeze(1).detach().cpu().numpy().tolist())
+#                 finished_instances = list(set(finished_instances))
+#                 if len(finished_instances) == batch_size: # inferencing of all instances meet the end token, stop
+#                     break
+
 #         # concat predictions
 #         y_hat = torch.stack(y_hat, dim=1) # N, label_L, vocab_size
 #         attentions = torch.cat(attentions, dim=2) # N, key_len, query_len
@@ -359,8 +364,8 @@ class Attention(nn.Module):
 #         return initiation
 
 class Decoder_RNN_Gumbel(nn.Module):
-    def __init__(self, batch_size, vocab_size, embed_size, key_value_size, hidden_size, n_layers, mlp_hidden_size, padding_value):
-        super(Decoder_RNN, self).__init__()
+    def __init__(self, vocab_size, embed_size, key_value_size, hidden_size, n_layers, mlp_hidden_size, padding_value):
+        super(Decoder_RNN_Gumbel, self).__init__()
         self.hidden_size = hidden_size
         self.embed_size = embed_size
         self.key_value_size = key_value_size  # key and value pair hidden size
@@ -394,7 +399,7 @@ class Decoder_RNN_Gumbel(nn.Module):
     def forward(self, argument_list):
         """only used to train other than inferencing"""
         key, value, labels, final_seq_lens, SOS_token, TEACHER_FORCING_Ratio = argument_list
-        batch_size, max_len = key.size(0), key.size(1)
+        batch_size, max_key_len = key.size(0), key.size(1)
         # labels have been sorted by seq_order
         # label lens for loss masking
         labels_lens = [len(label) for label in labels]
@@ -403,11 +408,11 @@ class Decoder_RNN_Gumbel(nn.Module):
         labels_padded = pad_sequence(labels, padding_value=self.padding_value) # L, N
 
         # onehot encoding for ground truth
-        y_onehot = torch.FloatTensor(max_len, batch_size, self.vocab_size)
+        y_onehot = torch.FloatTensor(labels_padded.size(0), batch_size, self.vocab_size).to(DEVICE)
         # initialize to zeros
         y_onehot.zero_()
         # onehot_encoding
-        labels_onehot = y_onehot.scatter_(2, labels_padded, 1) # onehot on dim2 with 1; L, N, Vocabsize
+        labels_onehot = y_onehot.scatter_(2, labels_padded.unsqueeze(2), 1) # onehot on dim2 with 1; L, N, Vocabsize
         labels_onehot.requires_grad = False # don't learn onehot labels
         # onehot smoothing
         # labels_smoothed = F.gumbel_softmax(labels_onehot, tau=1, hard=False, eps=1e-10) # functional gumble softmax only support 2 dimensions input
@@ -429,7 +434,7 @@ class Decoder_RNN_Gumbel(nn.Module):
             # [n_layers, N, Hidden_size]
             memory_states.append(self.init_states(key))
 
-        max_label_len = labels_embedding.size(0)
+        max_label_len = labels_padded.size(0)
 
         # query_mask, (0, max_length)
         
@@ -440,7 +445,7 @@ class Decoder_RNN_Gumbel(nn.Module):
 #         key_mask = key_mask < key_lens  # a matrix of 1 & 0; N, max_key_len
 #         key_mask = key_mask.unsqueeze(2).repeat(
 #             (1, 1, max_label_len)).float().to(DEVICE)  # expend to N, max_key_len, max_label_len; float for matrix mul when applying attention
-        key_mask = torch.arange(0, max_len) < final_seq_lens.view(
+        key_mask = torch.arange(0, max_key_len) < final_seq_lens.view(
             len(final_seq_lens), -1)
         key_mask = key_mask.unsqueeze(2).float().to(
             DEVICE)  # N, max_key_len, 1
@@ -448,8 +453,21 @@ class Decoder_RNN_Gumbel(nn.Module):
 
         # ------ LAS ------
         # initialze for the first time step input
+        # initialze for the first time step input
         y_hat_t_label = torch.LongTensor(
             [SOS_token]*batch_size).to(DEVICE)  # N
+
+        # onehot encoding for <SOS>
+        y_onehot = torch.FloatTensor(batch_size, self.vocab_size).to(DEVICE)
+        # initialize to zeros
+        y_onehot.zero_()
+        # onehot_encoding
+        y_hat_t_onehot = y_onehot.scatter_(1, y_hat_t_label.unsqueeze(1), 1) # onehot on dim2 with 1; L, N, Vocabsize
+        y_hat_t_onehot.requires_grad = False # don't learn onehot labels
+        # onehot smoothing
+        # labels_smoothed = F.gumbel_softmax(labels_onehot, tau=1, hard=False, eps=1e-10) # functional gumble softmax only support 2 dimensions input
+        y_hat_t = self.gumble_softmax(
+            y_hat_t_onehot, temperature=1.0, eps=1e-10) # L, N, Vocabsize
         y_hat = []
         y_hat_label = []
         attentions = []
@@ -465,8 +483,12 @@ class Decoder_RNN_Gumbel(nn.Module):
                     (y_hat_t_embedding, attention_context), dim=1)
             else:
                 # embedding
-                labels_embedding = self.embedding(
-                    labels_smoothed[time_index, :, :])  # N, emb
+                if time_index == 0: # use SOS embedding
+                    labels_embedding = self.embedding(
+                        y_hat_t)  # N, Embedding
+                else:
+                    labels_embedding = self.embedding(
+                        labels_smoothed[time_index, :, :])  # N, emb
                 rnn_input = torch.cat(
                     (labels_embedding, attention_context), dim=1)
 
@@ -510,7 +532,7 @@ class Decoder_RNN_Gumbel(nn.Module):
         attentions = torch.cat(attentions, dim=2)  # N, key_len, query_len
         y_hat_label = torch.stack(y_hat_label, dim=1)  # N, label_L
 
-        return y_hat, y_hat_label, labels_padded.permute(1, 0).detach().cpu(), labels_lens, attentions
+        return y_hat, y_hat_label, (labels_padded.permute(1, 0), labels_smoothed.permute(1, 0, 2)), labels_lens, attentions
 
     def inference(self, argument_list):
         """ when tesing"""
@@ -534,15 +556,15 @@ class Decoder_RNN_Gumbel(nn.Module):
         max_label_len = MAX_SEQ_LEN
 
         # query_mask, (0, max_length)
-        batch_size, max_len = key.size(0), key.size(1)
-#         key_mask = torch.stack([torch.arange(0, max_len)
+        batch_size, max_key_len = key.size(0), key.size(1)
+#         key_mask = torch.stack([torch.arange(0, max_key_len)
 #                                 for i in range(batch_size)]).int()
 #         key_lens = torch.stack(
-#             [torch.full((1, max_len), length).squeeze(0) for length in final_seq_lens]).int()
+#             [torch.full((1, max_key_len), length).squeeze(0) for length in final_seq_lens]).int()
 #         key_mask = key_mask < key_lens  # a matrix of 1 & 0; N, max_key_len
 #         key_mask = key_mask.unsqueeze(2).repeat(
 #             (1, 1, max_label_len)).float().to(DEVICE)  # expend to N, max_key_len, max_label_len; float for matrix mul when applying attention
-        key_mask = torch.arange(0, max_len) < final_seq_lens.view(
+        key_mask = torch.arange(0, max_key_len) < final_seq_lens.view(
             len(final_seq_lens), -1)
         key_mask = key_mask.unsqueeze(2).float().to(
             DEVICE)  # N, max_key_len, 1
@@ -552,16 +574,30 @@ class Decoder_RNN_Gumbel(nn.Module):
         # initialze for the first time step input
         y_hat_t_label = torch.LongTensor(
             [SOS_token]*batch_size).to(DEVICE)  # N
+
+        # onehot encoding for <SOS>
+        y_onehot = torch.FloatTensor(batch_size, self.vocab_size).to(DEVICE)
+        # initialize to zeros
+        y_onehot.zero_()
+        # onehot_encoding
+        y_hat_t_onehot = y_onehot.scatter_(1, y_hat_t_label.unsqueeze(1), 1) # onehot on dim2 with 1; L, N, Vocabsize
+        y_hat_t_onehot.requires_grad = False # don't learn onehot labels
+        # onehot smoothing
+        # labels_smoothed = F.gumbel_softmax(labels_onehot, tau=1, hard=False, eps=1e-10) # functional gumble softmax only support 2 dimensions input
+        y_hat_t = self.gumble_softmax(
+            y_hat_t_onehot, temperature=1.0, eps=1e-10) # L, N, Vocabsize
+        
         y_hat = []
         y_hat_label = []
         attentions = []
+        finished_instances = [] # use to end inferencing before max label len
         # iterate through max possible label length
         for time_index in range(max_label_len):
             # decoding rnn
             # decide whether to use teacher forcing in this time step
 
             # use last output as input, teacher_forcing_ratio == 0
-            y_hat_t_embedding = self.embedding(y_hat_t_label)  # N, Embedding
+            y_hat_t_embedding = self.embedding(y_hat_t)  # N, Embedding
             rnn_input = torch.cat(
                 (y_hat_t_embedding, attention_context), dim=1)
 
@@ -595,6 +631,7 @@ class Decoder_RNN_Gumbel(nn.Module):
 #             y_hat_t = self.fc2(torch.cat((query.squeeze(1), attention_context), dim=1)) # N, vocab_size
             y_hat.append(y_hat_t)  # N, vocab_size
             attentions.append(masked_softmax_energy.detach().cpu())
+            
             if SEARCH_MODE == 'greedy':
                 # N ; long tensor for embedding inputs: greedy output
                 y_hat_t_label = torch.argmax(y_hat_t, dim=1).long()
@@ -604,8 +641,11 @@ class Decoder_RNN_Gumbel(nn.Module):
                 NotImplemented
             y_hat_label.append(y_hat_t_label.detach().cpu())
 
-            if y_hat_t_label == EOS_token:  # inferencing meet the end token, stop
-                break
+            if EOS_token in y_hat_t_label: # if some one ended
+                finished_instances.extend((y_hat_t_label == EOS_token).nonzero().squeeze(1).detach().cpu().numpy().tolist())
+                finished_instances = list(set(finished_instances))
+                if len(finished_instances) == batch_size: # inferencing of all instances meet the end token, stop
+                    break
 
         # concat predictions
         y_hat = torch.stack(y_hat, dim=1)  # N, label_L, vocab_size
@@ -634,27 +674,34 @@ class Gumbel_Softmax(nn.Module):
         return -torch.log(-torch.log(uniform_samples + eps) + eps)
 
     def forward(self, logits, temperature=1.0, eps=1e-10):
-        y = logits + self.sample_gumbel_distribution(logits.size(), eps)
+        noise = self.sample_gumbel_distribution(logits.size(), eps)
+        if logits.is_cuda:
+            noise = noise.cuda()
+        y = logits + noise
         return F.softmax(y/temperature, dim=-1)
 
 class Sequence2Sequence(nn.Module):
     def __init__(self, embed_size, hidden_size, n_layers, n_plstm, mlp_hidden_size, mlp_output_size,
-                 decoder_vocab_size, decoder_embed_size, decoder_hidden_size, decoder_n_layers, decoder_mlp_hidden_size, decoder_padding_value):
+                 decoder_vocab_size, decoder_embed_size, decoder_hidden_size, decoder_n_layers, decoder_mlp_hidden_size, decoder_padding_value, GRUMBEL_SOFTMAX=False):
         super(Sequence2Sequence, self).__init__()
 
         self.encoder = Encoder_RNN(
             embed_size, hidden_size, n_layers, n_plstm, mlp_hidden_size, mlp_output_size)
-        self.decoder = Decoder_RNN(
-            decoder_vocab_size, decoder_embed_size, mlp_output_size, decoder_hidden_size, decoder_n_layers, decoder_mlp_hidden_size, decoder_padding_value)
+        if GRUMBEL_SOFTMAX:
+            self.decoder = Decoder_RNN_Gumbel(
+                decoder_vocab_size, decoder_embed_size, mlp_output_size, decoder_hidden_size, decoder_n_layers, decoder_mlp_hidden_size, decoder_padding_value)
+        else:
+            self.decoder = Decoder_RNN(
+				decoder_vocab_size, decoder_embed_size, mlp_output_size, decoder_hidden_size, decoder_n_layers, decoder_mlp_hidden_size, decoder_padding_value)
 
-    def forward(self, seq_batch, TEACHER_FORCING_Ratio=1, TEST=False, VALIDATE=False, MAX_SEQ_LEN=0):
+    def forward(self, seq_batch, TEACHER_FORCING_Ratio=1, TEST=False, VALIDATE=False, MAX_SEQ_LEN=0, SEARCH_MODE='greedy'):
         if TEST:
             # inferencing
             encoder_argument_list = [seq_batch, TEST]
             keys, values, final_seq_lens, sequence_order, reverse_sequence_order = self.encoder(
                 encoder_argument_list)
             argument_list = [keys, values, final_seq_lens, sequence_order,
-                             reverse_sequence_order, char_language_model.SOS_token, char_language_model.EOS_token, MAX_SEQ_LEN]
+                             reverse_sequence_order, char_language_model.SOS_token, char_language_model.EOS_token, MAX_SEQ_LEN, SEARCH_MODE]
             y_hat, y_hat_labels, attentions = self.decoder.inference(argument_list)
             return y_hat, y_hat_labels, attentions
         
@@ -665,7 +712,7 @@ class Sequence2Sequence(nn.Module):
             keys, values, labels, final_seq_lens, sequence_order, reverse_sequence_order = self.encoder(
                 encoder_argument_list)
             argument_list = [keys, values, final_seq_lens, sequence_order,
-                             reverse_sequence_order, char_language_model.SOS_token, char_language_model.EOS_token, MAX_SEQ_LEN]
+                             reverse_sequence_order, char_language_model.SOS_token, char_language_model.EOS_token, MAX_SEQ_LEN, SEARCH_MODE]
             y_hat, y_hat_labels, attentions = self.decoder.inference(argument_list)
             labels_lens = [len(label) for label in labels]
             return y_hat, y_hat_labels, labels, labels_lens, attentions
@@ -675,7 +722,7 @@ class Sequence2Sequence(nn.Module):
             encoder_argument_list = [seq_batch, TEST]
             keys, values, labels, final_seq_lens, sequence_order, reverse_sequence_order = self.encoder(
                 encoder_argument_list)
-            argument_list = [keys, values, labels, final_seq_lens, sequence_order,reverse_sequence_order, char_language_model.SOS_token, TEACHER_FORCING_Ratio, TEST]
+            argument_list = [keys, values, labels, final_seq_lens, char_language_model.SOS_token, TEACHER_FORCING_Ratio]
             y_hat, y_hat_labels, labels_padded, labels_lens, attentions = self.decoder(argument_list)
 
             return y_hat, y_hat_labels, labels_padded, labels_lens, attentions

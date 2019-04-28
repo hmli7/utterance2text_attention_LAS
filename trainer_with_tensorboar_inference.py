@@ -52,7 +52,11 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, languag
             optimizer.zero_grad()
             predictions, prediction_labels, sorted_labels, labels_lens, batch_attention = model(
                 (data_batch, label_batch), TEACHER_FORCING_Ratio, TEST=False)  # N, max_label_L, vocab_size; N, max_label_L
-
+            if len(sorted_labels)==2:
+                # the model returns true labels and smoothed onehot targets
+                true_sorted_labels, sorted_labels = sorted_labels
+            else:
+                true_sorted_labels = sorted_labels
             # mask for cross entropy loss
             batch_size, max_label_lens, _ = predictions.size()
 #             prediction_mask = torch.stack([torch.arange(0, max_label_lens) for i in range(batch_size)]).int()
@@ -61,8 +65,8 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, languag
             prediction_mask = (torch.arange(0, max_label_lens) < torch.tensor(labels_lens).view(len(labels_lens),-1)).float().to(DEVICE) # float for matrix mul
             prediction_mask.requires_grad = False
             # use cross entropy loss, assume set (reduce = False)
-            sorted_labels = sorted_labels.to(DEVICE)
-            sorted_labels.requires_grad = False
+#             sorted_labels = sorted_labels.to(DEVICE)
+#             sorted_labels.requires_grad = False
             batch_loss = 0.0
             for utterance_index, utterance_pred in enumerate(predictions):
                 # N,1 | N,L,Hidden_size
@@ -75,7 +79,7 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, languag
             perplexity_loss = torch.exp(batch_loss.sum()/prediction_mask.float().sum()).detach().cpu() # perplexity
             
             # distance
-            distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), sorted_labels.detach().cpu().numpy(), labels_lens, language_model)
+            distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model)
 #             print('distance', distance)
 #             print('-'*60)
     
@@ -101,7 +105,7 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, languag
             
             # 3. Log two visualizations
             tLog.add_figure('attention_last_instance_batch', plot_single_attention_return(batch_attention[0].squeeze(0).cpu().numpy()), global_step=global_iteration_index+1)
-            tLog.add_figure('gradient_flow_batch', plot_grad_flow_simple_return(model.named_parameters()), global_step=global_iteration_index+1)
+            tLog.add_figure('gradient_flow_batch', plot_grad_flow_return(model.named_parameters()), global_step=global_iteration_index+1)
             
             global_iteration_index += 1
             
@@ -120,6 +124,8 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, languag
                 avg_loss = 0.0
                 avg_distance = 0.0
                 avg_perplexity = 0.0
+            train_loss, train_distance, train_perplexity_loss = test_validation(
+            model, criterion, train_dataloader, language_model, DEVICE)
                 
             # clear memory
             data_batch = [data.detach() for data in data_batch]
@@ -140,7 +146,7 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, languag
             train_loss, train_distance, val_loss, val_distance), f=f)
         
         # add log to tensorboard
-        # 1. Log scalar values (scalar summary)
+        # 4. Log scalar values (scalar summary)
         vr_info = { 'train_loss': train_loss, 'train_perplexity': train_perplexity_loss, 'train_distance': train_distance,'val_loss': val_loss, 'val_perplexity': val_perplexity_loss, 'val_distance': val_distance }
 
         for tag, value in vr_info.items():
@@ -190,32 +196,36 @@ def test_validation(model, criterion, valid_dataloader, language_model, DEVICE):
     avg_perplexity = 0.0
     for idx,  (data_batch, label_batch) in enumerate(valid_dataloader):
         predictions, prediction_labels, sorted_labels, labels_lens, _ = model(
-            (data_batch, label_batch), TEACHER_FORCING_Ratio=0, TEST=False, VALIDATE=True, MAX_SEQ_LEN=500)  # N, max_label_L, vocab_size; N, max_label_L
+            (data_batch, label_batch), TEACHER_FORCING_Ratio=0, TEST=False, VALIDATE=True, MAX_SEQ_LEN=500, SEARCH_MODE='greedy')  # N, max_label_L, vocab_size; N, max_label_L
         
+        if len(sorted_labels)==2:
+            # the model returns true labels and smoothed onehot targets
+            true_sorted_labels, sorted_labels = sorted_labels
+        else:
+            true_sorted_labels = sorted_labels
         # mask for cross entropy loss
         batch_size, max_label_lens, _ = predictions.size()
-#         prediction_mask = torch.stack(
-#             [torch.arange(0, max_label_lens) for i in range(batch_size)]).int()
-#         prediction_mask = prediction_mask < torch.stack([torch.full(
-#             (1, max_label_lens), length).squeeze(0) for length in labels_lens]).int()
+#             prediction_mask = torch.stack([torch.arange(0, max_label_lens) for i in range(batch_size)]).int()
+#             prediction_mask = prediction_mask < torch.stack([torch.full(
+#                 (1, max_label_lens), length).squeeze(0) for length in labels_lens]).int()
         prediction_mask = (torch.arange(0, max_label_lens) < torch.tensor(labels_lens).view(len(labels_lens),-1)).float().to(DEVICE) # float for matrix mul
         prediction_mask.requires_grad = False
         # use cross entropy loss, assume set (reduce = False)
-        sorted_labels = sorted_labels.to(DEVICE)
-        sorted_labels.requires_grad = False
+#             sorted_labels = sorted_labels.to(DEVICE)
+#             sorted_labels.requires_grad = False
         batch_loss = 0.0
         for utterance_index, utterance_pred in enumerate(predictions):
             # N,1 | N,L,Hidden_size
             utterance_loss = criterion(utterance_pred, sorted_labels[utterance_index]) * prediction_mask[utterance_index]
             batch_loss += utterance_loss.sum() # use sum to punish long
-            
+
 #         batch_loss = criterion.forward(predictions.permute(0,2,1), sorted_labels.to(DEVICE)) #(N,C,d1) & (N,d1)
 #         batch_loss = batch_loss * prediction_mask
         loss = batch_loss.sum()/batch_size # loss per instance used for train
-        
-        perplexity_loss = torch.exp(batch_loss.sum()/prediction_mask.float().sum()).detach().cpu().item() # perplexity
+        perplexity_loss = torch.exp(batch_loss.sum()/prediction_mask.float().sum()).detach().cpu() # perplexity
 
-        distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), sorted_labels.detach().cpu().numpy(), labels_lens, language_model)
+        # distance
+        distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model)
         
         avg_loss += loss.detach().cpu().item()
         avg_distance += distance
@@ -242,7 +252,7 @@ def inference(model, test_dataloader):
     inferences = []
     for idx,  data_batch in enumerate(test_dataloader):
         predictions, prediction_labels, reverse_sequence_order = model(
-            data_batch, TEACHER_FORCING_Ratio=0, TEST=True, VALIDATE=False, MAX_SEQ_LEN=500)  # N, max_label_L, vocab_size; N, max_label_L; with grad; predict till EOS
+            data_batch, TEACHER_FORCING_Ratio=0, TEST=True, VALIDATE=False, MAX_SEQ_LEN=500, SEARCH_MODE='greedy')  # N, max_label_L, vocab_size; N, max_label_L; with grad; predict till EOS
         
         # all predictions are done till EOS token; unsort the list and append
         inferences.extend(predictions.detach().cpu().numpy()[reverse_sequence_order])
