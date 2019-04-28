@@ -79,8 +79,11 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             loss = batch_loss.sum()/batch_size # loss per instance used for train
             perplexity_loss = torch.exp(batch_loss.sum()/prediction_mask.float().sum()).detach().cpu() # perplexity
             
+            SHOW_RESULT = False # whether print out the prediction result while calculating distance 
+            if idx % 50 == 49:
+                SHOW_RESULT = True
             # distance
-            distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model)
+            distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT)
 #             print('distance', distance)
 #             print('-'*60)
     
@@ -233,8 +236,11 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
         loss = batch_loss.sum()/batch_size # loss per instance used for train
         perplexity_loss = torch.exp(batch_loss.sum()/prediction_mask.float().sum()).detach().cpu() # perplexity
 
+        SHOW_RESULT = False # whether print out the prediction result while calculating distance 
+        if idx % 50 == 49:
+            SHOW_RESULT = True
         # distance
-        distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), sorted_labels.detach().cpu().numpy(), labels_lens, language_model)
+        distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT)
         
         avg_loss += loss.detach().cpu().item()
         avg_distance += distance
@@ -277,7 +283,7 @@ def inference(model, test_dataloader):
         
     return inferences
 
-def evaluate_distance(predictions, padded_label, label_lens, lang):
+def evaluate_distance(predictions, padded_label, label_lens, lang, SHOW_RESULT=False):
     """ predictions: N, Max_len
         padded_labels: N, Max_len
         label_lens: N, len"""
@@ -299,7 +305,8 @@ def evaluate_distance(predictions, padded_label, label_lens, lang):
         ls += L.distance(pred, true)
         if i == 0:
             prediction_checker.extend([pred, true])
-    print("Pred: {}, True: {}".format(prediction_checker[0], prediction_checker[1]))
+    if SHOW_RESULT:
+        print("Pred: {}, True: {}".format(prediction_checker[0], prediction_checker[1]))
     return ls / predictions.shape[0]
 
 def validate_manually(encoder, decoder, lang, utterance, transcript, TEACHER_FORCING_Ratio=0):
