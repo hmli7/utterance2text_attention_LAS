@@ -144,8 +144,8 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             model, validation_criterion, train_dataloader, language_model, DEVICE)
         val_loss, val_distance, val_perplexity_loss = test_validation(
             model, validation_criterion, valid_dataloader, language_model, DEVICE)
-        print_file_and_screen('Train Loss: {:.4f}\tTrain Distance: {:.4f}\tVal Loss: {:.4f}\tVal Distance: {:.4f}'.format(
-            train_loss, train_distance, val_loss, val_distance), f=f)
+        print_file_and_screen('Train Loss: {:.4f}\tTrain Distance: {:.4f}\tTrain Perplexity: {:.4f}\tVal Loss: {:.4f}\tVal Distance: {:.4f}\tVal Perplexity: {:.4f}'.format(
+            train_loss, train_distance, train_perplexity_loss, val_loss, val_distance, val_perplexity_loss), f=f)
         
         # add log to tensorboard
         # 4. Log scalar values (scalar summary)
@@ -218,15 +218,17 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
             utterance_mask = prediction_mask[utterance_index] # max_prediction_len
             if utterance_pred.size(0) < utterance_padded_label.size(0):
                 # pad utterance pred
-                pad = ((0,utterance_padded_label.size(0)-utterance_pred.size(0)))
-                utterance_pred = F.pad(utterance_pred, pad, mode='constant', value=char_language_model.EOS_token)
-                utterance_mask = F.pad(utterance_mask, pad, mode='constant', value=0)
+                pred_pad = (0,0,0,utterance_padded_label.size(0)-utterance_pred.size(0)) # pad the second last dim with 0
+                mask_pad = ((0,utterance_padded_label.size(0)-utterance_pred.size(0))) # pad the last dim
+                utterance_pred = F.pad(utterance_pred, pred_pad, mode='constant', value=0)
+                utterance_mask = F.pad(utterance_mask, mask_pad, mode='constant', value=0)
                 utterance_mask.requires_grad = False
             elif utterance_padded_label.size(0) < utterance_pred.size(0):
-                # pad utterance label and mask
+                # pad utterance label
                 pad = ((0,utterance_pred.size(0)-utterance_padded_label.size(0)))
                 utterance_padded_label = F.pad(utterance_padded_label, pad, mode='constant', value=char_language_model.EOS_token)
                 utterance_padded_label.requires_grad = False
+#             pdb.set_trace()
             # N,1 | N,L,Hidden_size
             utterance_loss = validation_criterion(utterance_pred, utterance_padded_label) * utterance_mask
             batch_loss += utterance_loss.sum() # use sum to punish long
@@ -240,7 +242,7 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
         if idx % 50 == 49:
             SHOW_RESULT = True
         # distance
-        distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT)
+        distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT)
         
         avg_loss += loss.detach().cpu().item()
         avg_distance += distance
