@@ -189,8 +189,9 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             '- Best Epoch: %1d | - Best Val Loss: %.4f' % (best_epoch, best_vali_loss), f=f)
 
 
-def test_validation(model, validation_criterion, valid_dataloader, language_model, DEVICE):
-    print('## Start testing....')
+def test_validation(model, validation_criterion, valid_dataloader, language_model, DEVICE, PROMPT=True):
+    if PROMPT:
+        print('## Start validating....')
     model.eval()
     num_batches = len(valid_dataloader)
     avg_loss = 0.0
@@ -198,45 +199,59 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
     avg_perplexity = 0.0
     for idx,  (data_batch, label_batch) in enumerate(valid_dataloader):
         predictions, prediction_labels, sorted_labels, labels_lens, _ = model(
-            (data_batch, label_batch), TEACHER_FORCING_Ratio=0, TEST=False, VALIDATE=True, MAX_SEQ_LEN=500, SEARCH_MODE='greedy')  # N, max_label_L, vocab_size; N, max_label_L
+            (data_batch, label_batch), TEACHER_FORCING_Ratio=0, TEST=False, VALIDATE=True, NUM_CONFIG=500, SEARCH_MODE='greedy')  # N, max_label_L, vocab_size; N, max_label_L; NUM_CONFIG == MAX_SEQ_LEN
         
         # mask for cross entropy loss
         batch_size, max_label_lens, _ = predictions.size()
+## first version mask 
 #             prediction_mask = torch.stack([torch.arange(0, max_label_lens) for i in range(batch_size)]).int()
 #             prediction_mask = prediction_mask < torch.stack([torch.full(
 #                 (1, max_label_lens), length).squeeze(0) for length in labels_lens]).int()
-        prediction_mask = (torch.arange(0, max_label_lens) < torch.tensor(labels_lens).view(len(labels_lens),-1)).float().to(DEVICE) # float for matrix mul
-        prediction_mask.requires_grad = False
+## second version mask
+#         prediction_mask = (torch.arange(0, max_label_lens) < torch.tensor(labels_lens).view(len(labels_lens),-1)).float().to(DEVICE) # float for matrix mul
+#         prediction_mask.requires_grad = False
         # use cross entropy loss, assume set (reduce = False)
 #             sorted_labels = sorted_labels.to(DEVICE)
 #             sorted_labels.requires_grad = False
         batch_loss = 0.0
-
-        for utterance_index, utterance_pred in enumerate(predictions):
+        batch_perplexity = 0.0
+        for utterance_index, utterance_pred_residual in enumerate(predictions):
+            utterance_pred_label = prediction_labels[utterance_index]
+            # slice the label to the length where the model was trying to end for one utterance
+            if char_language_model.EOS_token in utterance_pred_label: # there exists EOS, use the first 1 as the end of sentence; the model will return a matrix, with the width of the last ended prediction
+                end_position = utterance_pred_label.detach().cpu().numpy().tolist().index(char_language_model.EOS_token)
+                if end_position < len(utterance_pred_label): # not the last one
+                    utterance_pred = utterance_pred_residual[:end_position+1]
+                else:
+                    utterance_pred = utterance_pred_residual
+            else:
+                utterance_pred = utterance_pred_residual # if no EOS, use the entire prediction
+            
             # pad to reach the same time length
             utterance_padded_label = sorted_labels[utterance_index] # max_label_len
-            utterance_mask = prediction_mask[utterance_index] # max_prediction_len
             if utterance_pred.size(0) < utterance_padded_label.size(0):
                 # pad utterance pred
                 pred_pad = (0,0,0,utterance_padded_label.size(0)-utterance_pred.size(0)) # pad the second last dim with 0
-                mask_pad = ((0,utterance_padded_label.size(0)-utterance_pred.size(0))) # pad the last dim
                 utterance_pred = F.pad(utterance_pred, pred_pad, mode='constant', value=0)
-                utterance_mask = F.pad(utterance_mask, mask_pad, mode='constant', value=0)
-                utterance_mask.requires_grad = False
             elif utterance_padded_label.size(0) < utterance_pred.size(0):
                 # pad utterance label
                 pad = ((0,utterance_pred.size(0)-utterance_padded_label.size(0)))
                 utterance_padded_label = F.pad(utterance_padded_label, pad, mode='constant', value=char_language_model.EOS_token)
                 utterance_padded_label.requires_grad = False
+            assert utterance_padded_label.size(0) == utterance_pred.size(0)
+            utterance_mask = (torch.arange(0, utterance_padded_label.size(0)) < torch.tensor(labels_lens[utterance_index])).float().to(DEVICE)
+            utterance_mask.requires_grad = False
+
 #             pdb.set_trace()
             # N,1 | N,L,Hidden_size
-            utterance_loss = validation_criterion(utterance_pred, utterance_padded_label) * utterance_mask
+            utterance_loss = validation_criterion(utterance_pred, utterance_padded_label.to(DEVICE)) * utterance_mask
             batch_loss += utterance_loss.sum() # use sum to punish long
+            batch_perplexity += utterance_loss.sum()/utterance_mask.sum()
 
 #         batch_loss = validation_criterion.forward(predictions.permute(0,2,1), sorted_labels.to(DEVICE)) #(N,C,d1) & (N,d1)
 #         batch_loss = batch_loss * prediction_mask
         loss = batch_loss.sum()/batch_size # loss per instance used for train
-        perplexity_loss = torch.exp(batch_loss.sum()/prediction_mask.float().sum()).detach().cpu() # perplexity
+        perplexity_loss = torch.exp(batch_perplexity.sum()/batch_size).detach().cpu() # perplexity
 
         SHOW_RESULT = False # whether print out the prediction result while calculating distance 
         if idx % 50 == 49:
@@ -261,29 +276,182 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
         
     return avg_loss/num_batches, avg_distance/num_batches, avg_perplexity/num_batches
 
+def test_validation_random_search(model, validation_criterion, valid_dataloader, language_model, DEVICE, MAX_SEQ_LEN=500, N_CANDIDATES=100):
+    print('## Start validating....')
+    model.eval()
+    num_batches = len(valid_dataloader)
+    avg_loss = 0.0
+    avg_distance = 0.0
+    avg_perplexity = 0.0
+    for idx,  (data_batch, label_batch) in enumerate(valid_dataloader):
+        print(idx)
+        candidate_y_hats, candidate_labels, sorted_labels, labels_lens, sequence_order = model(
+            (data_batch, label_batch), TEACHER_FORCING_Ratio=0, TEST=False, VALIDATE=True, NUM_CONFIG=(MAX_SEQ_LEN, N_CANDIDATES), SEARCH_MODE='random')
+        # N_candidates, batch_size, max_label_lens (vary in different try same within each try), vocab_size; N_candidates, batch_size, max_label_lens; batch_size, max_label_len; batch_size; NUM_CONFIG = (MAX_SEQ_LEN, N_CANDIDATES)
+        
+        # mask for cross entropy loss
+        batch_size, max_label_lens = sorted_labels.size()
 
-def inference(model, test_dataloader):
+#         prediction_mask = (torch.arange(0, max_label_lens) < torch.tensor(labels_lens).view(len(labels_lens),-1)).float().to(DEVICE) # float for matrix mul
+#         prediction_mask.requires_grad = False # same mask for all candidates
+        
+        # retrieve sorted utterance data
+        utterance_data = np.array(data_batch)[sequence_order]
+
+        batch_loss = 0.0
+        batch_perplexity = 0.0
+        prediction_labels = []
+        # for each utterance, pick a candidate and update loss; choose using pilot dummy loss using candidate as dummy true label; reporting dummy_loss
+        for utterance_index in range(batch_size):
+            print(idx, end=' ')
+            # retrieve candidates
+            utterance_labels_candidates = [pilot[utterance_index] for pilot in candidate_labels]
+            
+            # search winner
+            candidates_dummy_losses = []
+            for candidate in utterance_labels_candidates:
+                dummy_dataloader = [(utterance_data[utterance_index], candidate)] # a dummy data loader to get the dummy loss, distance, and perplexity
+                dummy_loss, dummy_distance, dummy_perplexity_loss = test_validation(model, validation_criterion, dummy_dataloader, language_model, DEVICE, PROMPT=False) # testing with greedy search
+                candidates_dummy_losses.append(dummy_loss)
+            winner_index = np.argmin(candidates_dummy_losses)
+            
+            utterance_pred = candidate_y_hats[winner_index][utterance_index, :, :] # label_len, vocab_size
+            prediction_labels.append(candidate.detach().cpu().numpy())
+            
+            # calculate gumbel_dummy_loss
+            # pad to reach the same time length
+            utterance_padded_label = sorted_labels[utterance_index] # max_label_len
+
+            if utterance_pred.size(0) < utterance_padded_label.size(0):
+                # pad utterance pred
+                pred_pad = (0,0,0,utterance_padded_label.size(0)-utterance_pred.size(0)) # pad the second last dim with 0
+                utterance_pred = F.pad(utterance_pred, pred_pad, mode='constant', value=0)
+            elif utterance_padded_label.size(0) < utterance_pred.size(0):
+                # pad utterance label
+                pad = ((0,utterance_pred.size(0)-utterance_padded_label.size(0)))
+                utterance_padded_label = F.pad(utterance_padded_label, pad, mode='constant', value=char_language_model.EOS_token)
+                utterance_padded_label.requires_grad = False
+                
+            utterance_mask = (torch.arange(0, utterance_padded_label.size(0)) < torch.tensor(labels_lens[utterance_index])).float().to(DEVICE)
+            utterance_mask.requires_grad = False
+            
+#             pdb.set_trace()
+            # N,1 | N,L,Hidden_size
+            utterance_loss = validation_criterion(utterance_pred, utterance_padded_label.to(DEVICE)) * utterance_mask
+            batch_loss += utterance_loss.sum() # use sum to punish long
+            batch_perplexity += utterance_loss.sum()/utterance_mask.sum()
+
+        loss = batch_loss.sum()/batch_size # loss per instance used for train
+        perplexity_loss = torch.exp(batch_perplexity.sum()/batch_size).detach().cpu() # perplexity
+
+        SHOW_RESULT = False # whether print out the prediction result while calculating distance 
+        if idx % 50 == 49:
+            SHOW_RESULT = True
+        # distance
+        distance = evaluate_distance(np.array(prediction_labels), sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT)
+        
+        avg_loss += loss.detach().cpu().item()
+        avg_distance += distance
+        avg_perplexity += perplexity_loss
+        
+        # clear memory
+        data_batch = [data.detach() for data in data_batch]
+        label_batch = [label.detach() for label in label_batch]
+        loss = loss.detach()
+        batch_loss = batch_loss.detach()
+        del data_batch, label_batch
+        del loss, batch_loss, perplexity_loss
+        torch.cuda.empty_cache()
+        
+    return avg_loss/num_batches, avg_distance/num_batches, avg_perplexity/num_batches
+
+def inference(model, test_dataloader,language_model, MAX_SEQ_LEN=500):
     print('## Start inferencing....')
     model.eval()
     num_batches = len(test_dataloader)
     inferences = []
     for idx,  data_batch in enumerate(test_dataloader):
         predictions, prediction_labels, reverse_sequence_order = model(
-            data_batch, TEACHER_FORCING_Ratio=0, TEST=True, VALIDATE=False, MAX_SEQ_LEN=500, SEARCH_MODE='greedy')  # N, max_label_L, vocab_size; N, max_label_L; with grad; predict till EOS
+            data_batch, TEACHER_FORCING_Ratio=None, TEST=True, VALIDATE=False, NUM_CONFIG=MAX_SEQ_LEN, SEARCH_MODE='greedy')  # N, max_label_L, vocab_size; N, max_label_L; with grad; predict till EOS; NUM_CONFIG == MAX_SEQ_LEN
         
+        # change label indexes to sentences
+        # use the first EOS token as the end of sentence because when infering the whole batch, it stop as the last one meet EOS token
+        prediction_sentences = []
+        for prediction in prediction_labels.numpy():
+            if char_language_model.EOS_token in prediction: # there exists EOS, use the first 1 as the end of sentence
+                end_position = prediction.tolist().index(char_language_model.EOS_token)
+                if end_position < len(prediction): # not the last one
+                    pred = prediction[:end_position+1]
+                else:
+                    pred = prediction
+            else:
+                pred = prediction # if no EOS, use the entire prediction
+            prediction_sentences.append(language_model.indexes2string(pred))
         # all predictions are done till EOS token; unsort the list and append
-        inferences.extend(predictions.detach().cpu().numpy()[reverse_sequence_order])
+        inferences.extend(np.array(prediction_sentences)[reverse_sequence_order])
+        
         # clear memory
         data_batch = [data.detach() for data in data_batch]
-        predictions = predictions.detach()
-        loss = loss.detach()
-        batch_loss = batch_loss.detach()
-        del data_batch, label_batch
-        del predictions
-        del loss, batch_loss, perplexity_loss
+        del data_batch
         torch.cuda.empty_cache()
         
     return inferences
+
+def inference_random_search(model, test_dataloader, language_model, MAX_SEQ_LEN=500, N_CANDIDATES=100):
+    print('## Start inferencing....')
+    model.eval()
+    num_batches = len(valid_dataloader)
+    inferences = []
+    for idx,  data_batch in enumerate(test_dataloader):
+        candidate_y_hats, candidate_labels, sequence_order, reverse_sequence_order = model(
+            data_batch, TEACHER_FORCING_Ratio=0, TEST=True, VALIDATE=False, NUM_CONFIG=(MAX_SEQ_LEN, N_CANDIDATES), SEARCH_MODE='random')
+        # N_candidates, batch_size, max_label_lens (vary in different try same within each try), vocab_size; N_candidates, batch_size, max_label_lens; NUM_CONFIG = (MAX_SEQ_LEN, N_CANDIDATES)
+        
+        # mask for cross entropy loss
+        batch_size = candidate_y_hats.size(1)
+        
+        # retrieve sorted utterance data
+        utterance_data = np.array(data_batch)[sequence_order]
+
+        prediction_labels = []
+        # for each utterance, pick a candidate and update loss; choose using pilot dummy loss using candidate as dummy true label; reporting dummy_loss
+        for utterance_index in range(batch_size):
+            # retrieve candidates
+            utterance_labels_candidates = [pilot[utterance_index] for pilot in candidate_labels]
+            
+            # search winner
+            candidates_dummy_losses = []
+            for candidate in utterance_labels_candidates:
+                dummy_dataloader = [(utterance_data[utterance_index], candidate)] # a dummy data loader to get the dummy loss, distance, and perplexity
+                dummy_loss, dummy_distance, dummy_perplexity_loss = test_validation(model, validation_criterion, dummy_dataloader, language_model, DEVICE) # testing with greedy search
+                candidates_dummy_losses.append(dummy_loss)
+            winner_index = np.argmin(candidates_dummy_losses)
+            
+            utterance_pred = candidate_y_hats[winner_index][utterance_index, :, :] # label_len, vocab_size
+            prediction_labels.append(candidate.detach().cpu().numpy())
+            
+        # change label indexes to sentences
+        prediction_sentences = []
+        for prediction in prediction_labels:
+            if char_language_model.EOS_token in prediction: # there exists EOS, use the first 1 as the end of sentence
+                end_position = prediction.tolist().index(char_language_model.EOS_token)
+                if end_position < len(prediction): # not the last one
+                    pred = prediction[:end_position+1]
+                else:
+                    pred = prediction
+            else:
+                pred = prediction # if no EOS, use the entire prediction
+            prediction_sentences.append(language_model.indexes2string(pred))
+            
+        inferences.extend(np.array(prediction_sentences)[reverse_sequence_order])
+                    
+        # clear memory
+        data_batch = [data.detach() for data in data_batch]
+        del data_batch
+        torch.cuda.empty_cache()
+        
+    return inferences
+
 
 def evaluate_distance(predictions, padded_label, label_lens, lang, SHOW_RESULT=False):
     """ predictions: N, Max_len

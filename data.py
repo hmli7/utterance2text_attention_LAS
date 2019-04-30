@@ -55,7 +55,7 @@ class Data():
     #         dataset = TensorDataset(torch.tensor(data, dtype=torch.float))
             dataset = UtteranceDataset.FrameDataset(data)
 
-        dataloader = DataLoader(dataset, shuffle=shuffle, batch_size=batch_size, drop_last=False, collate_fn=self.collate_fn)
+        dataloader = DataLoader(dataset, shuffle=shuffle, batch_size=batch_size, drop_last=False, num_workers=0, collate_fn=self.collate_fn) # multiprocessing set to 0 because the data is already on GPU; putting data onto GPU in dataset because various length and we are using customized collate function. if using multiprocessing, need to manually iterate through one batch of data, put them onto gpu before putting input model.
         
         return dataloader
 

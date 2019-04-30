@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
+
 def save_checkpoint(state, is_best, output_path, filename='checkpoint.pth.tar'):
 	torch.save(state, os.path.join(output_path, filename))
 	if is_best:
@@ -28,7 +29,7 @@ def wrap_up_experiment(metrics_file_path):
 # collate fn lets you control the return value of each batch
 # for packed_seqs, you want to return your data sorted by length
 def sort_instances(seq_list):
-	if len(seq_list) == 1:
+	if len(seq_list) != 2:
 		# testing
 		inputs = seq_list
 		targets = None
