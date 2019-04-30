@@ -16,7 +16,3 @@ test_data_path = os.path.join(input_path,"test.npy")
 # # model_path = "../model/model_dict.pt"
 
 output_path = os.path.join(cwd,"outputs")
-
-# plot pathes
-attention_path = os.path.join(output_path, 'attention_plots')
-gradient_path = os.path.join(output_path, 'gradient_plots')

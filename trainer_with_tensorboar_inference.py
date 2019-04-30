@@ -14,7 +14,6 @@ import sys
 import numpy as np
 import config
 from util import *
-import paths
 import char_language_model
 
 import pdb
@@ -22,7 +21,7 @@ import pdb
 from tensorboardX import SummaryWriter
 
 
-def run(model, optimizer, criterion, validation_criterion, train_dataloader, valid_dataloader, language_model, best_epoch, best_vali_loss, DEVICE, tLog, vLog, TEACHER_FORCING_Ratio=1, scheduler=None, start_epoch=None, model_prefix=config.model_prefix):
+def run(model, optimizer, criterion, validation_criterion, train_dataloader, valid_dataloader, language_model, best_epoch, best_vali_loss, DEVICE, tLog, vLog, teacher_forcing_scheduler, scheduler=None, start_epoch=None, model_prefix=config.model_prefix, output_path=None):
     best_eval = None
     start_epoch = 0 if start_epoch is None else start_epoch
     max_epoch = config.max_epoch
@@ -36,18 +35,24 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
 
     if scheduler is not None:
         print('-- Starting training with scheduler.')
+        
 
     for epoch in range(start_epoch, max_epoch+1):
         start_time = time.time()
         model.train()
         # outputs records
-        f = open(os.path.join(paths.output_path, 'metrics.txt'), 'a')
+        f = open(os.path.join(output_path, 'metrics.txt'), 'a')
         print_file_and_screen('### Epoch %5d' % (epoch), f=f)
 
         avg_loss = 0
         avg_distance = 0
         avg_perplexity = 0
         num_batches = len(train_dataloader)
+        
+        # update teacher forcing ratio
+        # update teacher forcing ratio
+        TEACHER_FORCING_Ratio = teacher_forcing_scheduler.get_rate(epoch)
+        
         # lists, presorted, preloaded on GPU
         for idx, (data_batch, label_batch) in enumerate(train_dataloader):
             optimizer.zero_grad()
@@ -55,7 +60,7 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
                 (data_batch, label_batch), TEACHER_FORCING_Ratio, TEST=False)  # N, max_label_L, vocab_size; N, max_label_L
             if len(sorted_labels)==2:
                 # the model returns true labels and smoothed onehot targets
-                true_sorted_labels, sorted_labels = sorted_labels
+                true_sorted_labels, gumbel_true_labels = sorted_labels
             else:
                 true_sorted_labels = sorted_labels
             # mask for cross entropy loss
@@ -71,7 +76,7 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             batch_loss = 0.0
             for utterance_index, utterance_pred in enumerate(predictions):
                 # N,1 | N,L,Hidden_size
-                utterance_loss = criterion(utterance_pred, sorted_labels[utterance_index]) * prediction_mask[utterance_index]
+                utterance_loss = criterion(utterance_pred, true_sorted_labels[utterance_index]) * prediction_mask[utterance_index]
                 batch_loss += utterance_loss.sum() # use sum to punish long
 
     #         batch_loss = criterion.forward(predictions.permute(0,2,1), sorted_labels.to(DEVICE)) #(N,C,d1) & (N,d1)
@@ -114,13 +119,13 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             global_iteration_index += 1
             
             if idx == 0:
-                plot_grad_flow_simple(model.named_parameters(), epoch, paths.gradient_path)
+                plot_grad_flow_simple(model.named_parameters(), epoch, os.path.join(output_path, 'gradient_plots'))
             
             if idx % 50 == 49:
                 # plot gradients
-                plot_grad_flow_simple(model.named_parameters(), epoch, paths.gradient_path)
+                plot_grad_flow_simple(model.named_parameters(), epoch, os.path.join(output_path, 'gradient_plots'))
                 # plot attention
-                plot_single_attention(batch_attention[0].squeeze(0).cpu().numpy(), epoch, paths.attention_path)
+                plot_single_attention(batch_attention[0].squeeze(0).cpu().numpy(), epoch, os.path.join(output_path, 'attention_plots'))
 
             if idx % 100 == 99:
                 print_file_and_screen('Epoch: {}\tBatch: {}\tAvg-Loss: {:.4f}\tAvg-Perplexity: {:.4f}\tAvg-Distance: {:.4f}'.format(
@@ -156,7 +161,7 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
 
         if scheduler is not None:
             # update loss on scheduer
-            scheduler.step(val_loss)
+            scheduler.step(val_distance)
 
         # check whether the best
         if val_loss < best_vali_loss:
@@ -174,7 +179,7 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             'best_vali_loss': best_vali_loss,
             'best_epoch': best_epoch,
             'optimizer_label_state_dict': optimizer.state_dict()
-        }, is_best, paths.output_path, filename=model_prefix+str(epoch)+'.pth.tar')
+        }, is_best, output_path, filename=model_prefix+str(epoch)+'.pth.tar')
 
         end_time = time.time()
         print_file_and_screen('Epoch time used: ',
@@ -183,7 +188,7 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
         f.close()
 
     # print summary to the file
-    with open(os.path.join(paths.output_path, 'metrics.txt'), 'a') as f:
+    with open(os.path.join(output_path, 'metrics.txt'), 'a') as f:
         print_file_and_screen('Summary:', f=f)
         print_file_and_screen(
             '- Best Epoch: %1d | - Best Val Loss: %.4f' % (best_epoch, best_vali_loss), f=f)
@@ -200,6 +205,12 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
     for idx,  (data_batch, label_batch) in enumerate(valid_dataloader):
         predictions, prediction_labels, sorted_labels, labels_lens, _ = model(
             (data_batch, label_batch), TEACHER_FORCING_Ratio=0, TEST=False, VALIDATE=True, NUM_CONFIG=500, SEARCH_MODE='greedy')  # N, max_label_L, vocab_size; N, max_label_L; NUM_CONFIG == MAX_SEQ_LEN
+        
+        if len(sorted_labels)==2:
+            # the model returns true labels and smoothed onehot targets
+            true_sorted_labels, gumbel_true_labels = sorted_labels
+        else:
+            true_sorted_labels = sorted_labels
         
         # mask for cross entropy loss
         batch_size, max_label_lens, _ = predictions.size()
@@ -228,7 +239,7 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
                 utterance_pred = utterance_pred_residual # if no EOS, use the entire prediction
             
             # pad to reach the same time length
-            utterance_padded_label = sorted_labels[utterance_index] # max_label_len
+            utterance_padded_label = true_sorted_labels[utterance_index] # max_label_len
             if utterance_pred.size(0) < utterance_padded_label.size(0):
                 # pad utterance pred
                 pred_pad = (0,0,0,utterance_padded_label.size(0)-utterance_pred.size(0)) # pad the second last dim with 0
@@ -257,7 +268,7 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
         if idx % 50 == 49:
             SHOW_RESULT = True
         # distance
-        distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT)
+        distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT)
         
         avg_loss += loss.detach().cpu().item()
         avg_distance += distance

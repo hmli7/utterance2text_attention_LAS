@@ -56,6 +56,7 @@ def sort_instances(seq_list):
 	else:
 		return ordered_inputs, ordered_seq_lens, seq_order, reverse_order
 
+
 def plot_grad_flow(named_parameters, epoch, path):
 	'''Plots the gradients flowing through different layers in the net during training.
 	Can be used for checking for possible gradient vanishing / exploding problems.
