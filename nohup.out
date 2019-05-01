@@ -1,0 +1,16 @@
+Batch Size:  64
+Preparing corpus...
+Traceback (most recent call last):
+  File "Gumbel_Run.py", line 65, in <module>
+    train_loader = data_helper.get_loader(mode='train')
+  File "/home/ubuntu/deep_learning/utterance2text_attention_LAS/data.py", line 44, in get_loader
+    labels = self.prepare_training_transcripts(labels_path)
+  File "/home/ubuntu/deep_learning/utterance2text_attention_LAS/data.py", line 65, in prepare_training_transcripts
+    self.LANG, lines = self.read_lang(lang_path)
+  File "/home/ubuntu/deep_learning/utterance2text_attention_LAS/data.py", line 86, in read_lang
+    lines = np.load(lang_path, encoding='bytes')
+  File "/home/ubuntu/anaconda3/envs/pytorch_p36/lib/python3.6/site-packages/numpy/lib/npyio.py", line 433, in load
+    pickle_kwargs=pickle_kwargs)
+  File "/home/ubuntu/anaconda3/envs/pytorch_p36/lib/python3.6/site-packages/numpy/lib/format.py", line 657, in read_array
+    array = pickle.load(fp, **pickle_kwargs)
+KeyboardInterrupt

@@ -166,6 +166,7 @@ class Decoder_RNN(nn.Module):
         # fc layer
         self.mlp = MLP(self.key_value_size*2, mlp_hidden_size, self.vocab_size)
 #         self.fc2 = nn.Linear(self.key_value_size*2, self.vocab_size)
+
     def forward(self, argument_list):
         """only used to train other than inferencing"""
         key, value, labels, final_seq_lens, SOS_token, TEACHER_FORCING_Ratio = argument_list
@@ -267,6 +268,176 @@ class Decoder_RNN(nn.Module):
         y_hat_label = torch.stack(y_hat_label, dim=1) # N, label_L
         
         return y_hat, y_hat_label, labels_padded.permute(1,0), labels_lens, attentions
+    
+    def beam_search_decode(self, utterance_key, utterance_value, utterance_label, utterance_seq_len, SOS_token, EOS_token, TEACHER_FORCING_Ratio, MAX_SEQ_LEN, beam_size, num_candidates):
+        '''do beam search decoding for training for one utterance a time
+        source: https://github.com/kaituoxu/Listen-Attend-Spell/blob/master/src/models/decoder.py'''
+        utterance_key = utterance_key.unsqueeze(0) # 1, key_len, key_hidden_size
+        utterance_value = utterance_value.unsqueeze(0)
+        utterance_label = utterance_label.unsqueeze(0) # 1, label_len
+
+        # embedding
+        labels_embedding = self.embedding(utterance_label)  # label L, emb
+
+        # ------ Init ------
+        # initialize attention, hidden states, memory states
+        attention_context = self.init_states(
+            utterance_key, hidden_size=key.size(2))  # 1, Key/query_len
+        # initialize hidden and memory states
+        hidden_states = [self.init_states(utterance_key)]  # 1, hidden_size
+        memory_states = [self.init_states(utterance_key)]  # 1, hidden_size
+        # hidden = [num layers * num directions, batch size, hid dim]
+        # cell = [num layers * num directions, batch size, hid dim]
+        for i in range(self.n_layers-1):
+            # we use single direction lstm cell in this case
+            hidden_states.append(self.init_states(utterance_key))
+            # [n_layers, N, Hidden_size]
+            memory_states.append(self.init_states(utterance_key))
+
+        max_label_len = utterance_label.size(1)
+
+        # query_mask, (0, max_length)
+        max_key_len = utterance_key.size(1)
+
+        key_mask = torch.arange(0, max_key_len) < utterance_seq_len
+        key_mask = key_mask.unsqueeze(2).float().to(DEVICE)  # 1, max_key_len, 1
+        key_mask.requires_grad = False
+
+        # ------ LAS ------
+        # initialze for the first time step input
+        y_hat_t_label = torch.LongTensor(
+            [SOS_token]).to(DEVICE)  # N
+
+
+        start_beam_node = {
+            'y_hat_t_labels':[y_hat_t_label],
+            'y_hats':[],
+            'attentions':[attention_context],
+            'previous_hidden':hidden_states,
+            'previous_memory':memory_states,
+            'previous_attention_c':attention_context,    
+            'prob':0.0
+        }
+        beam_nodes = [start_beam_node]
+        stopped_beam_nodes = []
+
+        # iterate through max possible label length
+        for time_index in range(max_label_len):
+            # best buffer
+            beam_nodes_candidates = []
+
+            for beam_node in beam_nodes:
+                # for each beam node in the buffer
+                # decide whether to use teacher forcing in this time step
+                use_teacher_forcing = True if random.random() < TEACHER_FORCING_Ratio else False
+                if not use_teacher_forcing:
+                    y_hat_t_embedding = self.embedding(
+                        beam_node['y_hat_t_labels'])  # N, Embedding
+                    rnn_input = torch.cat(
+                        (y_hat_t_embedding, attention_context), dim=1)
+                else:
+                    rnn_input = torch.cat(
+                        (labels_embedding[time_index, :], attention_context), dim=1)
+
+
+                # rnn
+                hidden_states[0], memory_states[0] = self.rnns[0](
+                    rnn_input, (beam_node['previous_hidden']
+                                [0], beam_node['previous_memory'][0])
+                )
+
+                for hidden_layer in range(1, self.n_layers):
+                    hidden_states[hidden_layer], memory_states[hidden_layer] = self.rnns[hidden_layer](
+                        hidden_states[hidden_layer - 1], (beam_node['previous_hidden']
+                                                          [hidden_layer], beam_node['previous_memory'][hidden_layer])
+                    )
+                rnn_output = hidden_states[-1]  # 1, hidden_size
+
+                # 1, query_len, key_value_size
+                utterance_query = self.fc(rnn_output.unsqueeze(1))
+
+                # apply attention to generate context
+                masked_softmax_energy = self.attention(
+                    utterance_key, utterance_query, key_mask)  # 1, key_len, query_len
+
+                # 1, key_len, query_len * 1, key_len, key_size
+                # 1, 1, key_len * 1, key_len, key_size => 1, 1, key_size
+                attention_context = torch.bmm(
+                    masked_softmax_energy.permute(0, 2, 1), value)
+                attention_context = attention_context.squeeze(1)  # 1, key_len
+
+                y_hat_t = self.mlp(
+                    torch.cat((query.squeeze(1), attention_context), dim=1))  # 1, vocab_size
+
+                # get top n candidate
+                logits = F.log_softmax(y_hat_t, dim=1)
+                candidate_probs, candidate_pred_labels = torch.topk(logits, beam_size, dim=1)
+
+                # push to buffer
+                for candidate_index in range(beam_size):
+                    new_beam_node = {
+                        'y_hat_t_labels': beam_node['y_hat_t_labels'] + [int(candidate_pred_labels[candidate_index])],
+                        'y_hats': beam_node['y_hats']+[y_hat_t] if len(beam_node['y_hats'])!=0 else [torch.zeros_like(y_hat_t), y_hat_t],
+                        'attentions': beam_node['attentions']+[masked_softmax_energy.detach().cpu()],
+                        'previous_hidden': hidden_states[:],
+                        'previous_memory': memory_states[:],
+                        'previous_attention_c': attention_context[:],
+                        'prob': beam_node['prob'] + candidate_probs[0, candidate_index]
+                    }
+                    beam_nodes_candidates.append(new_beam_node)
+                pdb.set_trace() # check whether list concating works
+                
+                # rank by prob
+                beam_nodes_candidates = sorted(beam_nodes_candidates, key=lambda x: x['prob'], reverse=True)[:beam_size]
+
+            beam_nodes = beam_nodes_candidates
+
+            if time_index == MAX_SEQ_LEN-1:
+                for beam_node in beam_nodes:
+                    beam_node['y_hat_t_labels'].append(EOS_token)
+            
+            left_beam_nodes = []
+            for beam_node in beam_nodes:
+                if beam_node['y_hat_t_labels'][-1] == EOS_token:
+                    stopped_beam_nodes.append(beam_node)
+                else:
+                    left_beam_nodes.append(beam_node)
+
+            beam_nodes = left_beam_nodes
+
+            if len(beam_nodes) == 0:
+                # stop decoding
+                break
+
+        # need to detach y_hat_label in each beam node to free memory
+        return sorted(stopped_beam_nodes, key=lambda x: x['prob'], reverse=True)[:min(len(stopped_beam_nodes), num_candidates)]
+
+    def forward_beam_search(self, argument_list):
+        """only used to train other than inferencing"""
+        keys, values, labels, final_seq_lens, SOS_token, EOS_token, TEACHER_FORCING_Ratio, MAX_SEQ_LEN, beam_size, num_candidates = argument_list
+        batch_size = len(keys)
+
+        # concat predictions
+        y_hat = []  # N, label_L, vocab_size
+        attentions = []  # N, key_len, query_len
+        y_hat_label = []  # N, label_L
+
+        for utterance_index in range(batch_size):
+            list_beam_candidates = self.beam_search_decode(keys[utterance_index], values[utterance_index], labels[utterance_index],
+                                                        final_seq_lens[utterance_index], SOS_token, EOS_token, TEACHER_FORCING_Ratio, MAX_SEQ_LEN, beam_size, num_candidates)
+            winner_beam_node = list_beam_candidates[0]
+           
+            y_hat.append(torch.stack(
+                winner_beam_node['y_hats'][1:], dim=-1).unsqueeze(0)) # 1, label_L, vocab_size
+            y_hat_label.append(torch.stack(
+                winner_beam_node['y_hat_t_labels'][1:], dim=-1).detach().cpu().unsqueeze(0))  # 1, label_L
+            attentions.append(torch.stack(
+                winner_beam_node['attentions'][1:], dim=-1).unsqueeze(0))  # 1, key_len, query_len
+        
+        y_hat = torch.stack(y_hat, dim=0)
+        y_hat_label = torch.stack(y_hat_label, dim=0)
+        attentions = torch.stack(attentions, dim=0)
+
     
     def inference(self, argument_list):
         '''the inference function allocation right function using search mode'''

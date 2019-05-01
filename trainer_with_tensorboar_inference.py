@@ -99,24 +99,6 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             avg_distance += distance
             avg_perplexity += perplexity_loss
             
-            # add log to tensorboard
-            # 1. Log scalar values (scalar summary)
-            tr_info = { 'loss': loss.cpu().detach().numpy(), 'perplexity': perplexity_loss.numpy(), 'distance': distance }
-
-            for tag, value in tr_info.items():
-                tLog.add_scalar(tag, value, global_iteration_index+1)
-
-            # 2. Log values and gradients of the parameters (histogram summary)
-            for tag, value in model.named_parameters():
-                tag = tag.replace('.', '/')
-                tLog.add_histogram(tag, value.data.cpu().numpy(), global_iteration_index+1)
-                tLog.add_histogram(tag+'/grad', value.grad.data.cpu().numpy(), global_iteration_index+1)
-            
-            # 3. Log two visualizations
-            tLog.add_figure('attention_last_instance_batch', plot_single_attention_return(batch_attention[0].squeeze(0).cpu().numpy()), global_step=global_iteration_index+1)
-            tLog.add_figure('gradient_flow_batch', plot_grad_flow_return(model.named_parameters()), global_step=global_iteration_index+1)
-            
-            global_iteration_index += 1
             
             if idx == 0:
                 plot_grad_flow_simple(model.named_parameters(), epoch, os.path.join(output_path, 'gradient_plots'))
@@ -126,6 +108,24 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
                 plot_grad_flow_simple(model.named_parameters(), epoch, os.path.join(output_path, 'gradient_plots'))
                 # plot attention
                 plot_single_attention(batch_attention[0].squeeze(0).cpu().numpy(), epoch, os.path.join(output_path, 'attention_plots'))
+                
+                # add log to tensorboard
+                # 1. Log scalar values (scalar summary)
+                tr_info = { 'loss': loss.cpu().detach().numpy(), 'perplexity': perplexity_loss.numpy(), 'distance': distance }
+
+                for tag, value in tr_info.items():
+                    tLog.add_scalar(tag, value, global_iteration_index+1)
+
+                # 2. Log values and gradients of the parameters (histogram summary)
+                for tag, value in model.named_parameters():
+                    tag = tag.replace('.', '/')
+                    tLog.add_histogram(tag, value.data.cpu().numpy(), global_iteration_index+1)
+                    tLog.add_histogram(tag+'/grad', value.grad.data.cpu().numpy(), global_iteration_index+1)
+
+                # 3. Log two visualizations
+                tLog.add_figure('attention_last_instance_batch', plot_single_attention_return(batch_attention[0].squeeze(0).cpu().numpy()), global_step=global_iteration_index+1)
+                tLog.add_figure('gradient_flow_batch', plot_grad_flow_return(model.named_parameters()), global_step=global_iteration_index+1)
+            global_iteration_index += 1
 
             if idx % 100 == 99:
                 print_file_and_screen('Epoch: {}\tBatch: {}\tAvg-Loss: {:.4f}\tAvg-Perplexity: {:.4f}\tAvg-Distance: {:.4f}'.format(
