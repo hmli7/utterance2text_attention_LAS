@@ -64,7 +64,7 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             else:
                 true_sorted_labels = sorted_labels
             # mask for cross entropy loss
-            batch_size, max_label_lens, _ = predictions.size()
+            batch_size, max_label_lens = sorted_labels.size()
 #             prediction_mask = torch.stack([torch.arange(0, max_label_lens) for i in range(batch_size)]).int()
 #             prediction_mask = prediction_mask < torch.stack([torch.full(
 #                 (1, max_label_lens), length).squeeze(0) for length in labels_lens]).int()
@@ -74,7 +74,27 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
 #             sorted_labels = sorted_labels.to(DEVICE)
 #             sorted_labels.requires_grad = False
             batch_loss = 0.0
+            
             for utterance_index, utterance_pred in enumerate(predictions):
+                # pad to reach the same time length
+                utterance_padded_label = sorted_labels[utterance_index] # max_label_len
+                if utterance_pred.size(0) < utterance_padded_label.size(0):
+                    # pad utterance pred
+                    pred_pad = (0,0,0,utterance_padded_label.size(0)-utterance_pred.size(0)) # pad the second last dim with 0
+                    pred_label_pad = ((0,utterance_padded_label.size(0)-utterance_pred.size(0)))
+                    utterance_pred = F.pad(utterance_pred, pred_pad, mode='constant', value=0)
+#                     utterance_padded_y_hat_label = F.pad(prediction_labels[utterance_index], pred_label_pad, mode='constant', value=char_language_model.EOS_token)
+                elif utterance_padded_label.size(0) < utterance_pred.size(0):
+                    # pad utterance label
+                    pad = ((0,utterance_pred.size(0)-utterance_padded_label.size(0)))
+                    utterance_padded_label = F.pad(utterance_padded_label, pad, mode='constant', value=char_language_model.EOS_token)
+                    utterance_padded_label.requires_grad = False
+                    
+#                 if utterance_padded_label is not None:
+#                     padded_pred_labels.append(utterance_padded_label)
+#                 else:
+#                     padded_pred_labels.append(prediction_labels[utterance_index])
+                    
                 # N,1 | N,L,Hidden_size
                 utterance_loss = criterion(utterance_pred, true_sorted_labels[utterance_index]) * prediction_mask[utterance_index]
                 batch_loss += utterance_loss.sum() # use sum to punish long
@@ -87,8 +107,14 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             SHOW_RESULT = False # whether print out the prediction result while calculating distance 
             if idx % 50 == 49:
                 SHOW_RESULT = True
+                
             # distance
-            distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT)
+            if type(prediction_labels) == torch.Tensor:
+                padded_pred_labels = prediction_labels.detach().cpu().numpy()
+            else:
+                # for beam search y hat labels are already numpy
+                padded_pred_labels = prediction_labels
+            distance = evaluate_distance(padded_pred_labels, true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT)
 #             print('distance', distance)
 #             print('-'*60)
     
@@ -137,7 +163,8 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             # clear memory
             data_batch = [data.detach() for data in data_batch]
             label_batch = [label.detach() for label in label_batch]
-            predictions = predictions.detach()
+            if type(predictions) == torch.Tensor:
+                predictions = predictions.detach()
             loss = loss.detach()
             batch_loss = batch_loss.detach()
             del data_batch, label_batch
@@ -520,7 +547,8 @@ def evaluate_distance(predictions, padded_label, label_lens, lang, SHOW_RESULT=F
     prediction_checker = []
     ls = 0.0
     batch_distance = []
-    for i in range(predictions.shape[0]): # for each instance
+    batch_size = len(predictions)
+    for i in range(batch_size): # for each instance
         if char_language_model.EOS_token in predictions[i]: # there exists EOS, use the first 1 as the end of sentence
             end_position = predictions[i].tolist().index(char_language_model.EOS_token)
             if end_position < len(predictions[i]): # not the last one
@@ -541,8 +569,8 @@ def evaluate_distance(predictions, padded_label, label_lens, lang, SHOW_RESULT=F
     if SHOW_RESULT:
         print("Pred: {}, True: {}".format(prediction_checker[0], prediction_checker[1]))
     if RETURN_UTTERANCE_DISTANCE:
-        return ls / predictions.shape[0], batch_distance
-    return ls / predictions.shape[0]
+        return ls / batch_size, batch_distance
+    return ls / batch_size
 
 def validate_manually(encoder, decoder, lang, utterance, transcript, TEACHER_FORCING_Ratio=0):
     # prepare data for encoder

@@ -71,7 +71,6 @@ class Decoder_RNN(nn.Module):
         self.vocab_size = vocab_size
         self.padding_value = padding_value
 
-#         assert self.hidden_size == self.key_value_size # when calculating attention score, we need key_value_size equals to rnn output size
 
         # for transcripts
         self.embedding = nn.Embedding(
@@ -242,9 +241,7 @@ class Decoder_RNN(nn.Module):
 
         # ------ LAS ------
         # initialze for the first time step input
-        y_hat_t_label = torch.LongTensor(
-            SOS_token).to(DEVICE)  # N
-
+        y_hat_t_label = torch.tensor(SOS_token).long().to(DEVICE)  # N
 
         start_beam_node = {
             'y_hat_t_labels':[y_hat_t_label],
@@ -268,9 +265,8 @@ class Decoder_RNN(nn.Module):
                 # decide whether to use teacher forcing in this time step
                 use_teacher_forcing = True if random.random() < TEACHER_FORCING_Ratio else False
                 if not use_teacher_forcing:
-                    pdb.set_trace()
                     y_hat_t_embedding = self.embedding(
-                        beam_node['y_hat_t_labels'])  # N, Embedding
+                        beam_node['y_hat_t_labels'][-1]).unsqueeze(0)  # N, Embedding
                     rnn_input = torch.cat(
                         (y_hat_t_embedding, attention_context), dim=1)
                 else:
@@ -328,8 +324,7 @@ class Decoder_RNN(nn.Module):
                 beam_nodes_candidates = sorted(beam_nodes_candidates, key=lambda x: x['prob'], reverse=True)[:beam_size]
 
             beam_nodes = beam_nodes_candidates
-
-            if time_index == MAX_SEQ_LEN-1:
+            if time_index == max_label_len-1:
                 for beam_node in beam_nodes:
                     beam_node['y_hat_t_labels'].append(torch.tensor(EOS_token).to(DEVICE))
             
@@ -339,13 +334,11 @@ class Decoder_RNN(nn.Module):
                     stopped_beam_nodes.append(beam_node)
                 else:
                     left_beam_nodes.append(beam_node)
-
             beam_nodes = left_beam_nodes
 
             if len(beam_nodes) == 0:
                 # stop decoding
                 break
-
         # need to detach y_hat_label in each beam node to free memory
         return sorted(stopped_beam_nodes, key=lambda x: x['prob'], reverse=True)[:min(len(stopped_beam_nodes), num_candidates)]
 
@@ -354,13 +347,13 @@ class Decoder_RNN(nn.Module):
         keys, values, labels, final_seq_lens, SOS_token, EOS_token, TEACHER_FORCING_Ratio, (MAX_SEQ_LEN, beam_size, num_candidates) = argument_list
         batch_size = len(keys)
         
-#         # labels have been sorted by seq_order
-#         # label lens for loss masking
-#         labels_lens = [len(label) for label in labels]
-#         # pad
-#         # sorted N, Label L; use -1 to pad, this will be initialized to zero in embedding
-#         labels_padded = pad_sequence(labels, padding_value=self.padding_value)
-#         labels_padded.requires_grad = False
+        # labels have been sorted by seq_order
+        # label lens for loss masking
+        labels_lens = [len(label) for label in labels]
+        # pad
+        # sorted N, Label L; use -1 to pad, this will be initialized to zero in embedding
+        labels_padded = pad_sequence(labels, padding_value=self.padding_value).permute(1,0)
+        labels_padded.requires_grad = False
 
         # concat predictions
         y_hat = []  # N, label_L, vocab_size
@@ -368,22 +361,21 @@ class Decoder_RNN(nn.Module):
         y_hat_label = []  # N, label_L
 
         for utterance_index in range(batch_size):
-            list_beam_candidates = self.beam_search_decode(keys[utterance_index], values[utterance_index], labels[utterance_index],
-                                                        final_seq_lens[utterance_index], SOS_token, EOS_token, TEACHER_FORCING_Ratio, MAX_SEQ_LEN, beam_size, num_candidates)
+            list_beam_candidates = self.beam_search_decode(keys[utterance_index], values[utterance_index], labels_padded[utterance_index], final_seq_lens[utterance_index], SOS_token, EOS_token, TEACHER_FORCING_Ratio, MAX_SEQ_LEN, beam_size, num_candidates)
             winner_beam_node = list_beam_candidates[0]
            
-            y_hat.append(torch.stack(
-                winner_beam_node['y_hats'][1:], dim=-1).unsqueeze(0)) # 1, label_L, vocab_size
+            y_hat.append(torch.cat(
+                winner_beam_node['y_hats'][1:], dim=0)) # label_L, vocab_size
             y_hat_label.append(torch.stack(
-                winner_beam_node['y_hat_t_labels'][1:], dim=-1).detach().cpu().unsqueeze(0))  # 1, label_L
-            attentions.append(torch.stack(
-                winner_beam_node['attentions'][1:], dim=-1).unsqueeze(0))  # 1, key_len, query_len
-        
-        y_hat = torch.stack(y_hat, dim=0)
-        y_hat_label = torch.stack(y_hat_label, dim=0)
-        attentions = torch.stack(attentions, dim=0)
-        
-        return y_hat, y_hat_label, labels_padded.permute(1,0), labels_lens, attentions
+                winner_beam_node['y_hat_t_labels'][1:]).detach().cpu().numpy())  # label_L
+            attentions.append(torch.cat(
+                winner_beam_node['attentions'][1:], dim=-1).squeeze(0))  # key_len, query_len
+#         pdb.set_trace()
+#         y_hat = torch.stack(y_hat, dim=0)
+#         y_hat_label = torch.stack(y_hat_label, dim=0)
+#         attentions = torch.stack(attentions, dim=0)
+#         pdb.set_trace()
+        return y_hat, y_hat_label, labels_padded, labels_lens, attentions
 
     
     def inference(self, argument_list):
