@@ -21,7 +21,7 @@ import pdb
 from tensorboardX import SummaryWriter
 
 
-def run(model, optimizer, criterion, validation_criterion, train_dataloader, valid_dataloader, language_model, best_epoch, best_vali_loss, DEVICE, tLog, vLog, teacher_forcing_scheduler, scheduler=None, start_epoch=None, model_prefix=config.model_prefix, output_path=None):
+def run(model, optimizer, criterion, validation_criterion, train_dataloader, valid_dataloader, language_model, best_epoch, best_vali_loss, DEVICE, tLog, vLog, teacher_forcing_scheduler, scheduler=None, start_epoch=None, model_prefix=config.model_prefix, NUM_CONFIG=0, TRAIN_SEARCH_MODE='greedy', output_path=None):
     best_eval = None
     start_epoch = 0 if start_epoch is None else start_epoch
     max_epoch = config.max_epoch
@@ -57,7 +57,7 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
         for idx, (data_batch, label_batch) in enumerate(train_dataloader):
             optimizer.zero_grad()
             predictions, prediction_labels, sorted_labels, labels_lens, batch_attention = model(
-                (data_batch, label_batch), TEACHER_FORCING_Ratio, TEST=False)  # N, max_label_L, vocab_size; N, max_label_L
+                (data_batch, label_batch), TEACHER_FORCING_Ratio, TEST=False, NUM_CONFIG=NUM_CONFIG, SEARCH_MODE=TRAIN_SEARCH_MODE)  # N, max_label_L, vocab_size; N, max_label_L
             if len(sorted_labels)==2:
                 # the model returns true labels and smoothed onehot targets
                 true_sorted_labels, gumbel_true_labels = sorted_labels
@@ -194,7 +194,7 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             '- Best Epoch: %1d | - Best Val Loss: %.4f' % (best_epoch, best_vali_loss), f=f)
 
 
-def test_validation(model, validation_criterion, valid_dataloader, language_model, DEVICE, PROMPT=True):
+def test_validation(model, validation_criterion, valid_dataloader, language_model, DEVICE, PROMPT=True, RETURN_UTTERANCE_LEVEL=False):
     if PROMPT:
         print('## Start validating....')
     model.eval()
@@ -202,7 +202,11 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
     avg_loss = 0.0
     avg_distance = 0.0
     avg_perplexity = 0.0
+    losses = []
+    distances = []
+    perplexities = []
     for idx,  (data_batch, label_batch) in enumerate(valid_dataloader):
+        
         predictions, prediction_labels, sorted_labels, labels_lens, _ = model(
             (data_batch, label_batch), TEACHER_FORCING_Ratio=0, TEST=False, VALIDATE=True, NUM_CONFIG=500, SEARCH_MODE='greedy')  # N, max_label_L, vocab_size; N, max_label_L; NUM_CONFIG == MAX_SEQ_LEN
         
@@ -224,8 +228,14 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
         # use cross entropy loss, assume set (reduce = False)
 #             sorted_labels = sorted_labels.to(DEVICE)
 #             sorted_labels.requires_grad = False
+
         batch_loss = 0.0
         batch_perplexity = 0.0
+        # for returning utterance level metrics
+        Batch_losses = []
+        Batch_distances = []
+        Batch_perplexities = []
+        
         for utterance_index, utterance_pred_residual in enumerate(predictions):
             utterance_pred_label = prediction_labels[utterance_index]
             # slice the label to the length where the model was trying to end for one utterance
@@ -257,7 +267,12 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
             # N,1 | N,L,Hidden_size
             utterance_loss = validation_criterion(utterance_pred, utterance_padded_label.to(DEVICE)) * utterance_mask
             batch_loss += utterance_loss.sum() # use sum to punish long
-            batch_perplexity += utterance_loss.sum()/utterance_mask.sum()
+            utterance_perplexity = utterance_loss.sum()/utterance_mask.sum()
+            batch_perplexity += utterance_perplexity
+            
+            # for returning utterance level metrics
+            Batch_losses.append(utterance_loss.sum())
+            Batch_perplexities.append(utterance_perplexity)
 
 #         batch_loss = validation_criterion.forward(predictions.permute(0,2,1), sorted_labels.to(DEVICE)) #(N,C,d1) & (N,d1)
 #         batch_loss = batch_loss * prediction_mask
@@ -268,7 +283,10 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
         if idx % 50 == 49:
             SHOW_RESULT = True
         # distance
-        distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT)
+        if RETURN_UTTERANCE_LEVEL:
+            distance, Batch_distances = evaluate_distance(prediction_labels.detach().cpu().numpy(), true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT, RETURN_UTTERANCE_LEVEL)
+        else:
+            distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT)
         
         avg_loss += loss.detach().cpu().item()
         avg_distance += distance
@@ -284,7 +302,13 @@ def test_validation(model, validation_criterion, valid_dataloader, language_mode
         del predictions
         del loss, batch_loss, perplexity_loss
         torch.cuda.empty_cache()
-        
+    
+        losses.append(Batch_losses)
+        distances.append(Batch_distances)
+        perplexities.append(Batch_perplexities)
+    
+    if RETURN_UTTERANCE_LEVEL:
+        return losses, distances, perplexities
     return avg_loss/num_batches, avg_distance/num_batches, avg_perplexity/num_batches
 
 def test_validation_random_search(model, validation_criterion, valid_dataloader, language_model, DEVICE, MAX_SEQ_LEN=500, N_CANDIDATES=100):
@@ -316,18 +340,36 @@ def test_validation_random_search(model, validation_criterion, valid_dataloader,
         for utterance_index in range(batch_size):
             print(idx, end=' ')
             # retrieve candidates
-            utterance_labels_candidates = [pilot[utterance_index] for pilot in candidate_labels]
+#             utterance_labels_candidates = [pilot[utterance_index] for pilot in candidate_labels]
+            utterance_labels_candidates = candidate_labels[utterance_index*N_CANDIDATES:(utterance_index+1)*N_CANDIDATES]
             
             # search winner
-            candidates_dummy_losses = []
+#             candidates_dummy_losses = []
+#             for candidate in utterance_labels_candidates:
+#                 dummy_dataloader = [(utterance_data[utterance_index], candidate)] # a dummy data loader to get the dummy loss, distance, and perplexity
+#                 dummy_loss, dummy_distance, dummy_perplexity_loss = test_validation(model, validation_criterion, dummy_dataloader, language_model, DEVICE, PROMPT=False) # testing with greedy search
+#                 candidates_dummy_losses.append(dummy_loss)
+        
+            # make sure the candidate pred label are where it mean to stop
+            # slice the label to the length where the model was trying to end for one utterance
+            utterance_dummy_labels = []
             for candidate in utterance_labels_candidates:
-                dummy_dataloader = [(utterance_data[utterance_index], candidate)] # a dummy data loader to get the dummy loss, distance, and perplexity
-                dummy_loss, dummy_distance, dummy_perplexity_loss = test_validation(model, validation_criterion, dummy_dataloader, language_model, DEVICE, PROMPT=False) # testing with greedy search
-                candidates_dummy_losses.append(dummy_loss)
-            winner_index = np.argmin(candidates_dummy_losses)
+                if char_language_model.EOS_token in candidate: # there exists EOS, use the first 1 as the end of sentence; the model will return a matrix, with the width of the last ended prediction
+                    end_position = candidate.detach().numpy().tolist().index(char_language_model.EOS_token)
+                    if end_position < len(candidate): # not the last one
+                        utterance_dummy_label = candidate[:end_position+1]
+                    else:
+                        utterance_dummy_label = candidate
+                else:
+                    utterance_dummy_label = candidate # if no EOS, use the entire prediction
+                utterance_dummy_labels.append(utterance_dummy_label)
             
-            utterance_pred = candidate_y_hats[winner_index][utterance_index, :, :] # label_len, vocab_size
-            prediction_labels.append(candidate.detach().cpu().numpy())
+            dummy_dataloader = [([utterance_data[utterance_index]]*len(utterance_dummy_labels), utterance_dummy_labels)]
+            candidates_dummy_losses, candidates_dummy_distances, candidates_dummy_perplexity_losses = test_validation(model, validation_criterion, dummy_dataloader, language_model, DEVICE, PROMPT=False, RETURN_UTTERANCE_LEVEL=True) # testing with greedy search
+            winner_index = np.argmin(candidates_dummy_distances[0]) # use 0th one because we have batch size 1
+            
+            utterance_pred = candidate_y_hats[utterance_index*N_CANDIDATES+winner_index, :, :] # label_len, vocab_size
+            prediction_labels.append(utterance_dummy_labels[winner_index].detach().cpu().numpy())
             
             # calculate gumbel_dummy_loss
             # pad to reach the same time length
@@ -408,10 +450,10 @@ def inference(model, test_dataloader,language_model, MAX_SEQ_LEN=500):
         
     return inferences
 
-def inference_random_search(model, test_dataloader, language_model, MAX_SEQ_LEN=500, N_CANDIDATES=100):
+def inference_random_search(model, test_dataloader, language_model, validation_criterion, DEVICE, MAX_SEQ_LEN=500, N_CANDIDATES=100):
     print('## Start inferencing....')
     model.eval()
-    num_batches = len(valid_dataloader)
+    num_batches = len(test_dataloader)
     inferences = []
     for idx,  data_batch in enumerate(test_dataloader):
         candidate_y_hats, candidate_labels, sequence_order, reverse_sequence_order = model(
@@ -419,7 +461,7 @@ def inference_random_search(model, test_dataloader, language_model, MAX_SEQ_LEN=
         # N_candidates, batch_size, max_label_lens (vary in different try same within each try), vocab_size; N_candidates, batch_size, max_label_lens; NUM_CONFIG = (MAX_SEQ_LEN, N_CANDIDATES)
         
         # mask for cross entropy loss
-        batch_size = candidate_y_hats.size(1)
+        batch_size = len(sequence_order)
         
         # retrieve sorted utterance data
         utterance_data = np.array(data_batch)[sequence_order]
@@ -427,32 +469,39 @@ def inference_random_search(model, test_dataloader, language_model, MAX_SEQ_LEN=
         prediction_labels = []
         # for each utterance, pick a candidate and update loss; choose using pilot dummy loss using candidate as dummy true label; reporting dummy_loss
         for utterance_index in range(batch_size):
-            # retrieve candidates
-            utterance_labels_candidates = [pilot[utterance_index] for pilot in candidate_labels]
+            utterance_labels_candidates = candidate_labels[utterance_index*N_CANDIDATES:(utterance_index+1)*N_CANDIDATES]
             
-            # search winner
-            candidates_dummy_losses = []
+            utterance_dummy_labels = []
             for candidate in utterance_labels_candidates:
-                dummy_dataloader = [(utterance_data[utterance_index], candidate)] # a dummy data loader to get the dummy loss, distance, and perplexity
-                dummy_loss, dummy_distance, dummy_perplexity_loss = test_validation(model, validation_criterion, dummy_dataloader, language_model, DEVICE) # testing with greedy search
-                candidates_dummy_losses.append(dummy_loss)
-            winner_index = np.argmin(candidates_dummy_losses)
+                if char_language_model.EOS_token in candidate: # there exists EOS, use the first 1 as the end of sentence; the model will return a matrix, with the width of the last ended prediction
+                    end_position = candidate.detach().numpy().tolist().index(char_language_model.EOS_token)
+                    if end_position < len(candidate): # not the last one
+                        utterance_dummy_label = candidate[:end_position+1]
+                    else:
+                        utterance_dummy_label = candidate
+                else:
+                    utterance_dummy_label = candidate # if no EOS, use the entire prediction
+                utterance_dummy_labels.append(utterance_dummy_label)
             
-            utterance_pred = candidate_y_hats[winner_index][utterance_index, :, :] # label_len, vocab_size
-            prediction_labels.append(candidate.detach().cpu().numpy())
+            dummy_dataloader = [([utterance_data[utterance_index]]*len(utterance_dummy_labels), utterance_dummy_labels)]
+            candidates_dummy_losses, candidates_dummy_distances, candidates_dummy_perplexity_losses = test_validation(model, validation_criterion, dummy_dataloader, language_model, DEVICE, PROMPT=False, RETURN_UTTERANCE_LEVEL=True) # testing with greedy search
+            winner_index = np.argmin(candidates_dummy_distances[0]) # use 0th one because we have batch size 1
+            
+            utterance_pred = candidate_y_hats[utterance_index*N_CANDIDATES+winner_index, :, :] # label_len, vocab_size
+            prediction_labels.append(utterance_dummy_labels[winner_index].detach().cpu().numpy())
             
         # change label indexes to sentences
         prediction_sentences = []
         for prediction in prediction_labels:
-            if char_language_model.EOS_token in prediction: # there exists EOS, use the first 1 as the end of sentence
-                end_position = prediction.tolist().index(char_language_model.EOS_token)
-                if end_position < len(prediction): # not the last one
-                    pred = prediction[:end_position+1]
-                else:
-                    pred = prediction
-            else:
-                pred = prediction # if no EOS, use the entire prediction
-            prediction_sentences.append(language_model.indexes2string(pred))
+#             if char_language_model.EOS_token in prediction: # there exists EOS, use the first 1 as the end of sentence
+#                 end_position = prediction.tolist().index(char_language_model.EOS_token)
+#                 if end_position < len(prediction): # not the last one
+#                     pred = prediction[:end_position+1]
+#                 else:
+#                     pred = prediction
+#             else:
+#                 pred = prediction # if no EOS, use the entire prediction
+            prediction_sentences.append(language_model.indexes2string(prediction))
             
         inferences.extend(np.array(prediction_sentences)[reverse_sequence_order])
                     
@@ -464,12 +513,13 @@ def inference_random_search(model, test_dataloader, language_model, MAX_SEQ_LEN=
     return inferences
 
 
-def evaluate_distance(predictions, padded_label, label_lens, lang, SHOW_RESULT=False):
+def evaluate_distance(predictions, padded_label, label_lens, lang, SHOW_RESULT=False, RETURN_UTTERANCE_DISTANCE=False):
     """ predictions: N, Max_len
         padded_labels: N, Max_len
         label_lens: N, len"""
     prediction_checker = []
     ls = 0.0
+    batch_distance = []
     for i in range(predictions.shape[0]): # for each instance
         if char_language_model.EOS_token in predictions[i]: # there exists EOS, use the first 1 as the end of sentence
             end_position = predictions[i].tolist().index(char_language_model.EOS_token)
@@ -483,11 +533,15 @@ def evaluate_distance(predictions, padded_label, label_lens, lang, SHOW_RESULT=F
         true = padded_label[i][:label_lens[i]]
         pred = lang.indexes2string(pred)
         true = lang.indexes2string(true)
-        ls += L.distance(pred, true)
+        utterance_distance = L.distance(pred, true)
+        ls += utterance_distance
+        batch_distance.append(utterance_distance)
         if i == 0:
             prediction_checker.extend([pred, true])
     if SHOW_RESULT:
         print("Pred: {}, True: {}".format(prediction_checker[0], prediction_checker[1]))
+    if RETURN_UTTERANCE_DISTANCE:
+        return ls / predictions.shape[0], batch_distance
     return ls / predictions.shape[0]
 
 def validate_manually(encoder, decoder, lang, utterance, transcript, TEACHER_FORCING_Ratio=0):
