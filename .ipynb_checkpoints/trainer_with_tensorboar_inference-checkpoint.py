@@ -477,14 +477,14 @@ def inference(model, test_dataloader,language_model, MAX_SEQ_LEN=500):
         
     return inferences
 
-def inference_random_search(model, test_dataloader, language_model, validation_criterion, DEVICE, MAX_SEQ_LEN=500, N_CANDIDATES=100):
+def inference_random_search(model, test_dataloader, language_model, validation_criterion, DEVICE, MAX_SEQ_LEN=500, N_CANDIDATES=100, GUMBEL_T=1.0):
     print('## Start inferencing....')
     model.eval()
     num_batches = len(test_dataloader)
     inferences = []
     for idx,  data_batch in enumerate(test_dataloader):
         candidate_y_hats, candidate_labels, sequence_order, reverse_sequence_order = model(
-            data_batch, TEACHER_FORCING_Ratio=0, TEST=True, VALIDATE=False, NUM_CONFIG=(MAX_SEQ_LEN, N_CANDIDATES), SEARCH_MODE='random')
+            data_batch, TEACHER_FORCING_Ratio=0, TEST=True, VALIDATE=False, NUM_CONFIG=(MAX_SEQ_LEN, N_CANDIDATES, GUMBEL_T), SEARCH_MODE='random')
         # N_candidates, batch_size, max_label_lens (vary in different try same within each try), vocab_size; N_candidates, batch_size, max_label_lens; NUM_CONFIG = (MAX_SEQ_LEN, N_CANDIDATES)
         
         # mask for cross entropy loss
@@ -539,6 +539,37 @@ def inference_random_search(model, test_dataloader, language_model, validation_c
         
     return inferences
 
+def inference_beam_search(model, test_dataloader,language_model, MAX_SEQ_LEN=500, beam_size=5, num_candidates=1):
+    print('## Start inferencing....')
+    model.eval()
+    num_batches = len(test_dataloader)
+    inferences = []
+    for idx,  data_batch in enumerate(test_dataloader):
+        predictions, prediction_labels, _, reverse_sequence_order = model(
+            data_batch, TEACHER_FORCING_Ratio=None, TEST=True, VALIDATE=False, NUM_CONFIG=(MAX_SEQ_LEN, beam_size, num_candidates), SEARCH_MODE='beam_search')  # N, max_label_L, vocab_size; N, max_label_L; with grad; predict till EOS; NUM_CONFIG == MAX_SEQ_LEN
+        
+        # change label indexes to sentences
+        # use the first EOS token as the end of sentence because when infering the whole batch, it stop as the last one meet EOS token
+        prediction_sentences = []
+        for prediction in prediction_labels:
+            if char_language_model.EOS_token in prediction: # there exists EOS, use the first 1 as the end of sentence
+                end_position = prediction.tolist().index(char_language_model.EOS_token)
+                if end_position < len(prediction): # not the last one
+                    pred = prediction[:end_position+1]
+                else:
+                    pred = prediction
+            else:
+                pred = prediction # if no EOS, use the entire prediction
+            prediction_sentences.append(language_model.indexes2string(pred))
+        # all predictions are done till EOS token; unsort the list and append
+        inferences.extend(np.array(prediction_sentences)[reverse_sequence_order])
+        
+        # clear memory
+        data_batch = [data.detach() for data in data_batch]
+        del data_batch
+        torch.cuda.empty_cache()
+        
+    return inferences
 
 def evaluate_distance(predictions, padded_label, label_lens, lang, SHOW_RESULT=False, RETURN_UTTERANCE_DISTANCE=False):
     """ predictions: N, Max_len

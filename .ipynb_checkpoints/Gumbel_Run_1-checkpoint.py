@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# In[2]:
 
 
 import numpy as np
@@ -14,7 +14,13 @@ import matplotlib.pyplot as plt
 # %matplotlib inline
 
 
-# In[2]:
+# In[3]:
+
+
+from loss import *
+
+
+# In[4]:
 
 
 import paths
@@ -22,29 +28,28 @@ import config
 import util
 import importlib
 import data
-import loss
 import decay
-import sequence2sequence_Atten_modules_withgumbel
+import s2s_controller
 import trainer, trainer_with_tensorboar, trainer_with_tensorboar_inference
 import char_language_model
 
 
-# In[3]:
+# In[5]:
 
 
-reload_packages = [paths, util, config, data, loss, decay, sequence2sequence_Atten_modules_withgumbel, trainer, trainer_with_tensorboar, trainer_with_tensorboar_inference, char_language_model]
+reload_packages = [paths, util, config, data, decay, s2s_controller, trainer, trainer_with_tensorboar, trainer_with_tensorboar_inference, char_language_model]
 for package in reload_packages:
     importlib.reload(package)
 # importlib.reload(data)
 
 
-# In[4]:
+# In[6]:
 
 
 from tensorboardX import SummaryWriter
 
 
-# In[5]:
+# In[7]:
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -53,13 +58,13 @@ DEVICE
 
 # # Load Data
 
-# In[6]:
+# In[8]:
 
 
 data_helper = data.Data()
 
 
-# In[7]:
+# In[9]:
 
 
 train_loader = data_helper.get_loader(mode='train')
@@ -71,20 +76,31 @@ test_loader = data_helper.get_loader(mode='test')
 #     - why loss is so large for almost the same prediction
 # - [x] add teacher force decay
 # - [x] add grumbel lr decay
-# - [ ] try to predict using early models
-# - [ ] weight initialization according to the paper
-# - [ ] init bias with tf
-# - [ ] pretrain word embedding
+# - [ ] gumbel temperature -> closer to onehot through iteration
+# - [ ] try freeze encoder and keep going from 8 epoch
+# - [ ] try use pretrained encoder from baseline model
+#     - [ ] freeze the pretrained part
+#     - [ ] unfreeze the pretrained part
+
+# In[10]:
+
+
+# for child in model_ft.children():
+# ct += 1
+# if ct < 7:
+#     for param in child.parameters():
+#         param.requires_grad = False
+
 
 # # Define model
 
-# In[8]:
+# In[11]:
 
 
 data_helper.LANG.n_chars
 
 
-# In[9]:
+# In[12]:
 
 
 parameters = {
@@ -108,19 +124,19 @@ parameters = {
 # cannot use -1 for label, which will cause error in criterion
 
 
-# In[10]:
+# In[13]:
 
 
-model = sequence2sequence_Atten_modules_withgumbel.Sequence2Sequence(**parameters) 
+model = s2s_controller.Sequence2Sequence(**parameters) 
 
 
-# In[11]:
+# In[14]:
 
 
 model
 
 
-# In[13]:
+# In[15]:
 
 
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -128,13 +144,13 @@ optimizer = optim.Adam(model.parameters(), lr=1e-3)
 best_epoch, best_vali_loss, starting_epoch = 0, 400, 0
 
 
-# In[14]:
+# In[16]:
 
 
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.01, patience=1, verbose=True)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=1, verbose=True)
 
 
-# In[15]:
+# In[17]:
 
 
 criterion = nn.CrossEntropyLoss(reduction='none')
@@ -142,54 +158,53 @@ criterion = nn.CrossEntropyLoss(reduction='none')
 validation_criterion = nn.CrossEntropyLoss(reduction='none') # validation uses hard label ground truth to calculate loss
 
 
-# In[17]:
+# In[18]:
 
 
 output_path = os.path.join(paths.output_path, 'experiment_gumbel_outputs')
 
 
-# In[18]:
+# In[19]:
 
 
-# proceeding from old models
-model_path = os.path.join(output_path, 'baseline_s2s_6.pth.tar')
-print("=> loading checkpoint '{}'".format(model_path))
-checkpoint = torch.load(model_path)
-starting_epoch = checkpoint['epoch']+1
-# best_vali_acc = checkpoint['best_vali_acc']
-model_state_dict = checkpoint['model_state_dict']
-model.load_state_dict(model_state_dict)
-optimizer.load_state_dict(checkpoint['optimizer_label_state_dict'])
-best_vali_loss = checkpoint['best_vali_loss']
-best_epoch = checkpoint['best_epoch']
-print("=> loaded checkpoint '{}' (epoch {})"
-      .format(model_path, checkpoint['epoch']))
-# del checkpoint, model_state_dict
+# # proceeding from old models
+# model_path = os.path.join(output_path, 'baseline_s2s_6.pth.tar')
+# print("=> loading checkpoint '{}'".format(model_path))
+# checkpoint = torch.load(model_path)
+# starting_epoch = checkpoint['epoch']+1
+# # best_vali_acc = checkpoint['best_vali_acc']
+# model_state_dict = checkpoint['model_state_dict']
+# model.load_state_dict(model_state_dict)
+# optimizer.load_state_dict(checkpoint['optimizer_label_state_dict'])
+# best_vali_loss = checkpoint['best_vali_loss']
+# best_epoch = checkpoint['best_epoch']
+# print("=> loaded checkpoint '{}' (epoch {})"
+#       .format(model_path, checkpoint['epoch']))
+# # del checkpoint, model_state_dict
+
+
+# In[20]:
+
+
+# for state in optimizer.state.values():
+#     for k, v in state.items():
+#         if isinstance(v, torch.Tensor):
+#             state[k] = v.cuda()
 
 
 # In[21]:
 
 
-for state in optimizer.state.values():
-    for k, v in state.items():
-        if isinstance(v, torch.Tensor):
-            state[k] = v.cuda()
+init_TEACHER_FORCING_Ratio=0.9
+decay_scheduler = decay.BasicDecay(initial_rate=init_TEACHER_FORCING_Ratio, anneal_rate=0.98, min_rate=0, every_step=5, mode='step')
+
+for i in range(30):
+    print(decay_scheduler.get_rate(i))
 
 
 # In[22]:
 
 
-init_TEACHER_FORCING_Ratio=0.9
-decay_scheduler = decay.BasicDecay(initial_rate=init_TEACHER_FORCING_Ratio, anneal_rate=1, min_rate=0, every_step=5, mode='step')
-
-for i in range(20):
-    print(decay_scheduler.get_rate(i))
-
-
-# In[23]:
-
-
-# %pdb
 with SummaryWriter(os.path.join(output_path, "tensorboard_logs/train_pytorch"), comment='training') as tLog, SummaryWriter(os.path.join(output_path, "tensorboard_logs/val_pytorch"), comment='testing') as vLog: 
 #     tLog.add_graph(model, test_input, True)
     trainer_with_tensorboar_inference.run(model = model,
@@ -205,13 +220,13 @@ with SummaryWriter(os.path.join(output_path, "tensorboard_logs/train_pytorch"), 
                                             tLog = tLog,
                                             vLog = vLog,
                                             teacher_forcing_scheduler = decay_scheduler,
-                                            scheduler=None, 
+                                            scheduler=scheduler, 
                                             start_epoch=starting_epoch, 
-                                            model_prefix=config.model_prefix,
+                                            model_prefix='baseline_gumbel_s2s_',
                                             output_path=output_path)
 
 
-# In[19]:
+# In[ ]:
 
 
 # %pdb
