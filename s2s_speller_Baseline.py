@@ -62,14 +62,31 @@ class Attention(nn.Module):
 
 
 class Decoder_RNN(nn.Module):
-    def __init__(self, vocab_size, embed_size, key_value_size, hidden_size, n_layers, mlp_hidden_size, padding_value):
+    def __init__(self, vocab_size, embed_size, key_value_size, hidden_size, n_layers, mlp_hidden_size, padding_value, batch_size=64, INIT_STATE=True):
         super(Decoder_RNN, self).__init__()
+        '''the INIT_STATE parameter controls whether init the hidden and memory cell each batch; if not, then we can only use fix batch size'''
         self.hidden_size = hidden_size
         self.embed_size = embed_size
         self.key_value_size = key_value_size # key and value pair hidden size
         self.n_layers = n_layers
         self.vocab_size = vocab_size
         self.padding_value = padding_value
+        self.INIT_STATE = INIT_STATE
+        
+        dummy_key = torch.zeros(batch_size, 1, key_value_size).float().to(DEVICE) # a dummy key (output of encoder) for states initialization
+        
+        if not self.INIT_STATE:
+            # if not init state each batch, we init them here
+            # initialize hidden and memory states
+            self.hidden_states = [self.init_states(dummy_key)]  # N, hidden_size
+            self.memory_states = [self.init_states(dummy_key)]  # N, hidden_size
+            # hidden = [num layers * num directions, batch size, hid dim]
+            # cell = [num layers * num directions, batch size, hid dim]
+            for i in range(self.n_layers-1):
+                # we use single direction lstm cell in this case
+                self.hidden_states.append(self.init_states(dummy_key))
+                # [n_layers, N, Hidden_size]
+                self.memory_states.append(self.init_states(dummy_key))
 
 
         # for transcripts
@@ -91,6 +108,13 @@ class Decoder_RNN(nn.Module):
         # fc layer
         self.mlp = MLP(self.key_value_size*2, mlp_hidden_size, self.vocab_size)
 #         self.fc2 = nn.Linear(self.key_value_size*2, self.vocab_size)
+
+    def detach_states(self):
+        '''detach states initiated in the beginning after each batch'''
+        for idx, state in enumerate(self.hidden_states):
+            self.hidden_states[idx] = state.detach()
+        for idx, state in enumerate(self.memory_states):
+            self.memory_states[idx] = state.detach()
     
     def forward(self, argument_list):
         '''control which forward method to use'''
@@ -119,16 +143,20 @@ class Decoder_RNN(nn.Module):
         # ------ Init ------
         # initialize attention, hidden states, memory states
         attention_context = self.init_states(key, hidden_size=key.size(2))  # N, Key/query_len
-        # initialize hidden and memory states
-        hidden_states = [self.init_states(key)]  # N, hidden_size
-        memory_states = [self.init_states(key)]  # N, hidden_size
-        # hidden = [num layers * num directions, batch size, hid dim]
-        # cell = [num layers * num directions, batch size, hid dim]
-        for i in range(self.n_layers-1):
-            # we use single direction lstm cell in this case
-            hidden_states.append(self.init_states(key))
-            # [n_layers, N, Hidden_size]
-            memory_states.append(self.init_states(key))
+        if self.INIT_STATE:
+            # initialize hidden and memory states
+            self.hidden_states = [self.init_states(key)]  # N, hidden_size
+            self.memory_states = [self.init_states(key)]  # N, hidden_size
+            # hidden = [num layers * num directions, batch size, hid dim]
+            # cell = [num layers * num directions, batch size, hid dim]
+            for i in range(self.n_layers-1):
+                # we use single direction lstm cell in this case
+                self.hidden_states.append(self.init_states(key))
+                # [n_layers, N, Hidden_size]
+                self.memory_states.append(self.init_states(key))
+        else:
+            # detach hidden and memory from graph before doing backprop
+            self.detach_states()
 
         max_label_len = labels_embedding.size(0)
         
@@ -161,15 +189,15 @@ class Decoder_RNN(nn.Module):
             # decoding rnn
 
             # rnn
-            hidden_states[0], memory_states[0] = self.rnns[0](
-                rnn_input, (hidden_states[0], memory_states[0])
+            self.hidden_states[0], self.memory_states[0] = self.rnns[0](
+                rnn_input, (self.hidden_states[0], self.memory_states[0])
             )
 
             for hidden_layer in range(1, self.n_layers):
-                hidden_states[hidden_layer], memory_states[hidden_layer] = self.rnns[hidden_layer](
-                    hidden_states[hidden_layer - 1], (hidden_states[hidden_layer], memory_states[hidden_layer])
+                self.hidden_states[hidden_layer], self.memory_states[hidden_layer] = self.rnns[hidden_layer](
+                    self.hidden_states[hidden_layer - 1], (self.hidden_states[hidden_layer], self.memory_states[hidden_layer])
                 )
-            rnn_output = hidden_states[-1]  # N, hidden_size
+            rnn_output = self.hidden_states[-1]  # N, hidden_size
             
             query = self.fc(rnn_output.unsqueeze(1)) # N, query_len, key_value_size
 
@@ -202,6 +230,7 @@ class Decoder_RNN(nn.Module):
         y_hat = torch.stack(y_hat, dim=1) # N, label_L, vocab_size
         attentions = torch.cat(attentions, dim=2) # N, key_len, query_len
         y_hat_label = torch.stack(y_hat_label, dim=1) # N, label_L
+        
         
         return y_hat, y_hat_label, labels_padded.permute(1,0), labels_lens, attentions
     
@@ -402,15 +431,16 @@ class Decoder_RNN(nn.Module):
         # initialize attention, hidden states, memory states
         attention_context = self.init_states(key, hidden_size=key.size(2))  # N, Key/query_len
         # initialize hidden and memory states
-        hidden_states = [self.init_states(key)]  # N, hidden_size
-        memory_states = [self.init_states(key)]  # N, hidden_size
+        # initialize hidden and memory states
+        self.hidden_states = [self.init_states(key)]  # N, hidden_size
+        self.memory_states = [self.init_states(key)]  # N, hidden_size
         # hidden = [num layers * num directions, batch size, hid dim]
         # cell = [num layers * num directions, batch size, hid dim]
         for i in range(self.n_layers-1):
             # we use single direction lstm cell in this case
-            hidden_states.append(self.init_states(key))
+            self.hidden_states.append(self.init_states(key))
             # [n_layers, N, Hidden_size]
-            memory_states.append(self.init_states(key))
+            self.memory_states.append(self.init_states(key))
 
         max_label_len = MAX_SEQ_LEN
         
@@ -445,15 +475,15 @@ class Decoder_RNN(nn.Module):
             # decide whether to use teacher forcing in this time step
     
             # rnn
-            hidden_states[0], memory_states[0] = self.rnns[0](
-                rnn_input, (hidden_states[0], memory_states[0])
+            self.hidden_states[0], self.memory_states[0] = self.rnns[0](
+                rnn_input, (self.hidden_states[0], self.memory_states[0])
             )
 
             for hidden_layer in range(1, self.n_layers):
-                hidden_states[hidden_layer], memory_states[hidden_layer] = self.rnns[hidden_layer](
-                    hidden_states[hidden_layer - 1], (hidden_states[hidden_layer], memory_states[hidden_layer])
+                self.hidden_states[hidden_layer], self.memory_states[hidden_layer] = self.rnns[hidden_layer](
+                    self.hidden_states[hidden_layer - 1], (self.hidden_states[hidden_layer], self.memory_states[hidden_layer])
                 )
-            rnn_output = hidden_states[-1]  # N, hidden_size
+            rnn_output = self.hidden_states[-1]  # N, hidden_size
             
             query = self.fc(rnn_output.unsqueeze(1)) # N, query_len, key_value_size
 
@@ -666,7 +696,7 @@ class Decoder_RNN(nn.Module):
                 y_hat_t_embedding = self.embedding(
                     beam_node['y_hat_t_labels'][-1]).unsqueeze(0)  # N, Embedding
                 rnn_input = torch.cat(
-                    (y_hat_t_embedding, attention_context), dim=1)
+                    (y_hat_t_embedding, beam_node['previous_attention_c']), dim=1)
                 
                 # rnn
                 hidden_states[0], memory_states[0] = self.rnns[0](

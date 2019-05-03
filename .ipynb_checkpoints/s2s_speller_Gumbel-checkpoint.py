@@ -74,13 +74,13 @@ class Decoder_RNN_Gumbel(nn.Module):
         #gumble softmax for onehot smoothing
         self.gumble_softmax = Gumbel_Softmax()
         
-#         # for transcripts
-#         self.embedding_1 = nn.Embedding(
-#             self.vocab_size, self.embed_size) # , padding_idx=self.padding_value  using index of <EOS> to pad
-# #         self.embedding_1.requres_grad = False # do not train label embedding
-        # for y_hat
-        self.embedding = nn.Linear(
-            self.vocab_size, self.embed_size)  # , padding_idx=self.padding_value vocab_size + 1 for <padding value>; using index of <EOS> to pad
+        # for transcripts
+        self.embedding = nn.Embedding(
+            self.vocab_size, self.embed_size) # , padding_idx=self.padding_value  using index of <EOS> to pad
+# #         self.embedding.requres_grad = False # do not train label embedding
+#         # for y_hat
+#         self.embedding = nn.Linear(
+#             self.vocab_size, self.embed_size)  # , padding_idx=self.padding_value vocab_size + 1 for <padding value>; using index of <EOS> to pad
         
         # rnn cells
         self.rnns = nn.ModuleList()
@@ -120,18 +120,18 @@ class Decoder_RNN_Gumbel(nn.Module):
         # sorted N, Label L; use -1 to pad, this will be initialized to zero in embedding
         labels_padded = pad_sequence(labels, padding_value=self.padding_value) # L, N
         
-        # <--- previous add noise to ground truth label version --->
-        # onehot encoding for ground truth
-        y_onehot = torch.FloatTensor(labels_padded.size(0), batch_size, self.vocab_size).to(DEVICE)
-        # initialize to zeros
-        y_onehot.zero_()
-        # onehot_encoding
-        labels_onehot = y_onehot.scatter_(2, labels_padded.unsqueeze(2), 1) # onehot on dim2 with 1; L, N, Vocabsize
-        labels_onehot.requires_grad = False # don't learn onehot labels
-        # onehot smoothing
-#         labels_smoothed = F.gumbel_softmax(labels_onehot, tau=1, hard=False, eps=1e-10) # functional gumble softmax only support 2 dimensions input
-        labels_smoothed = self.gumble_softmax(
-            labels_onehot, temperature=1.2, eps=1e-10) # L, N, Vocabsize
+#         # <--- previous add noise to ground truth label version --->
+#         # onehot encoding for ground truth
+#         y_onehot = torch.FloatTensor(labels_padded.size(0), batch_size, self.vocab_size).to(DEVICE)
+#         # initialize to zeros
+#         y_onehot.zero_()
+#         # onehot_encoding
+#         labels_onehot = y_onehot.scatter_(2, labels_padded.unsqueeze(2), 1) # onehot on dim2 with 1; L, N, Vocabsize
+#         labels_onehot.requires_grad = False # don't learn onehot labels
+#         # onehot smoothing
+# #         labels_smoothed = F.gumbel_softmax(labels_onehot, tau=1, hard=False, eps=1e-10) # functional gumble softmax only support 2 dimensions input
+#         labels_smoothed = self.gumble_softmax(
+#             labels_onehot, temperature=1.2, eps=1e-10) # L, N, Vocabsize
 #         labels_embedding = self.embedding(labels_smoothed)
 
         # ------ Init ------
@@ -172,19 +172,19 @@ class Decoder_RNN_Gumbel(nn.Module):
         y_hat_t_label = torch.LongTensor(
             [SOS_token]*batch_size).to(DEVICE)  # N
 
-        # onehot encoding for <SOS>
-        y_onehot = torch.FloatTensor(batch_size, self.vocab_size).to(DEVICE)
-        # initialize to zeros
-        y_onehot.zero_()
-        # onehot_encoding
-        y_hat_t_onehot = y_onehot.scatter_(1, y_hat_t_label.unsqueeze(1), 1) # onehot on dim2 with 1; L, N, Vocabsize
-        y_hat_t_onehot.requires_grad = False # don't learn onehot labels
-        # onehot smoothing
-#         # labels_smoothed = F.gumbel_softmax(labels_onehot, tau=1, hard=False, eps=1e-10) # functional gumble softmax only support 2 dimensions input
-        y_hat_t_smoothed = self.gumble_softmax(
-            y_hat_t_onehot, temperature=1.0, eps=1e-10) # L, N, Vocabsize
-#         labels_embedding = self.embedding(y_hat_t)  # N, Embedding
-        y_hat_t_embedding = self.embedding(y_hat_t_smoothed)
+#         # onehot encoding for <SOS>
+#         y_onehot = torch.FloatTensor(batch_size, self.vocab_size).to(DEVICE)
+#         # initialize to zeros
+#         y_onehot.zero_()
+#         # onehot_encoding
+#         y_hat_t_onehot = y_onehot.scatter_(1, y_hat_t_label.unsqueeze(1), 1) # onehot on dim2 with 1; L, N, Vocabsize
+#         y_hat_t_onehot.requires_grad = False # don't learn onehot labels
+#         # onehot smoothing
+# #         # labels_smoothed = F.gumbel_softmax(labels_onehot, tau=1, hard=False, eps=1e-10) # functional gumble softmax only support 2 dimensions input
+#         y_hat_t_smoothed = self.gumble_softmax(
+#             y_hat_t_onehot, temperature=1.0, eps=1e-10) # L, N, Vocabsize
+# #         labels_embedding = self.embedding(y_hat_t)  # N, Embedding
+        y_hat_t_embedding = self.embedding(y_hat_t_label)
         rnn_input = torch.cat(
             (y_hat_t_embedding, attention_context), dim=1)
         y_hat = []
@@ -224,7 +224,7 @@ class Decoder_RNN_Gumbel(nn.Module):
 #             y_hat_t = self.fc2(torch.cat((query.squeeze(1), attention_context), dim=1)) # N, vocab_size
             y_hat.append(y_hat_t)  # N, vocab_size
             attentions.append(masked_softmax_energy.detach().cpu())
-            y_hat_smoothed = self.gumble_softmax(y_hat_t, temperature=0.5, eps=1e-10) # L, N, Vocabsize
+            y_hat_smoothed = self.gumble_softmax(y_hat_t, temperature=1, eps=1e-10) # L, N, Vocabsize
 
             # N ; long tensor for embedding inputs
             y_hat_t_label = torch.argmax(y_hat_smoothed, dim=1).long()
@@ -234,14 +234,14 @@ class Decoder_RNN_Gumbel(nn.Module):
             use_teacher_forcing = True if random.random() < TEACHER_FORCING_Ratio else False
             if not use_teacher_forcing:
                 y_hat_t_embedding = self.embedding(
-                    y_hat_smoothed)  # N, Embedding
+                    y_hat_t_label)  # N, Embedding
                 rnn_input = torch.cat(
                     (y_hat_t_embedding, attention_context), dim=1)
             else:
                 # embedding
 #                 label_embedding = self.embedding(
 #                     labels_smoothed[time_index, :, :])  # N, emb
-                y_hat_t_embedding = self.embedding(labels_smoothed[time_index, :, :]) # N, Embedding
+                y_hat_t_embedding = self.embedding(labels_padded[time_index, :]) # N, Embedding
                 rnn_input = torch.cat(
                     (y_hat_t_embedding, attention_context), dim=1)
 
@@ -308,15 +308,15 @@ class Decoder_RNN_Gumbel(nn.Module):
         y_hat_t_label = torch.LongTensor(
             [SOS_token]*batch_size).to(DEVICE)  # N
         
-        # onehot encoding for <SOS>
-        y_onehot = torch.FloatTensor(batch_size, self.vocab_size).to(DEVICE)
-        # initialize to zeros
-        y_onehot.zero_()
-        # onehot_encoding
-        y_hat_t_onehot = y_onehot.scatter_(1, y_hat_t_label.unsqueeze(1), 1) # onehot on dim2 with 1; L, N, Vocabsize
-        y_hat_t_onehot.requires_grad = False # don't learn onehot labels
-
-        y_hat_t_embedding = self.embedding(y_hat_t_onehot)
+#         # onehot encoding for <SOS>
+#         y_onehot = torch.FloatTensor(batch_size, self.vocab_size).to(DEVICE)
+#         # initialize to zeros
+#         y_onehot.zero_()
+#         # onehot_encoding
+#         y_hat_t_onehot = y_onehot.scatter_(1, y_hat_t_label.unsqueeze(1), 1) # onehot on dim2 with 1; L, N, Vocabsize
+#         y_hat_t_onehot.requires_grad = False # don't learn onehot labels
+#         # no smooth for the first input when inferencing
+        y_hat_t_embedding = self.embedding(y_hat_t_label)
         rnn_input = torch.cat(
             (y_hat_t_embedding, attention_context), dim=1)
 
@@ -359,7 +359,7 @@ class Decoder_RNN_Gumbel(nn.Module):
             y_hat.append(y_hat_t)  # N, vocab_size
             attentions.append(masked_softmax_energy.detach().cpu())
         
-            y_hat_smoothed = self.gumble_softmax(y_hat_t, temperature=0.5, eps=1e-10) # L, N, Vocabsize
+            y_hat_smoothed = self.gumble_softmax(y_hat_t, temperature=1, eps=1e-10) # L, N, Vocabsize
             
             # N ; long tensor for embedding inputs: greedy output
             y_hat_t_label = torch.argmax(y_hat_smoothed, dim=1).long()
@@ -373,7 +373,7 @@ class Decoder_RNN_Gumbel(nn.Module):
                     break
             
             # use output as the input of next time step, teacher_forcing_ratio == 0
-            y_hat_t_embedding = self.embedding(y_hat_smoothed)  # N, Embedding
+            y_hat_t_embedding = self.embedding(y_hat_t_label)  # N, Embedding
             rnn_input = torch.cat(
                 (y_hat_t_embedding, attention_context), dim=1)
 

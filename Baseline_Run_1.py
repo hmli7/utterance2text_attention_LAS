@@ -11,10 +11,16 @@ import torch.optim as optim
 import torch.nn as nn
 
 import matplotlib.pyplot as plt
-
+# %matplotlib inline
 
 
 # In[2]:
+
+
+from loss import *
+
+
+# In[3]:
 
 
 import paths
@@ -22,29 +28,28 @@ import config
 import util
 import importlib
 import data
-import loss
 import decay
-import sequence2sequence_Atten_modules_withgumbel
+import s2s_controller
 import trainer, trainer_with_tensorboar, trainer_with_tensorboar_inference
 import char_language_model
-
-
-# In[3]:
-
-
-reload_packages = [paths, util, config, data, loss, decay, sequence2sequence_Atten_modules_withgumbel, trainer, trainer_with_tensorboar, trainer_with_tensorboar_inference, char_language_model]
-for package in reload_packages:
-    importlib.reload(package)
-# importlib.reload(data)
 
 
 # In[4]:
 
 
-from tensorboardX import SummaryWriter
+reload_packages = [paths, util, config, data, decay, s2s_controller, trainer, trainer_with_tensorboar, trainer_with_tensorboar_inference, char_language_model]
+for package in reload_packages:
+    importlib.reload(package)
+# importlib.reload(data)
 
 
 # In[5]:
+
+
+from tensorboardX import SummaryWriter
+
+
+# In[6]:
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -53,13 +58,13 @@ DEVICE
 
 # # Load Data
 
-# In[6]:
+# In[7]:
 
 
 data_helper = data.Data()
 
 
-# In[7]:
+# In[8]:
 
 
 train_loader = data_helper.get_loader(mode='train')
@@ -71,20 +76,21 @@ test_loader = data_helper.get_loader(mode='test')
 #     - why loss is so large for almost the same prediction
 # - [x] add teacher force decay
 # - [x] add grumbel lr decay
-# - [ ] try to predict using early models
+# - [x] try to predict using early models
+# - [ ] TODO: in random search inferensing, use a batch of same utterance of size NUM_CANDIDATE instead of looping.
 # - [ ] weight initialization according to the paper
 # - [ ] init bias with tf
 # - [ ] pretrain word embedding
 
 # # Define model
 
-# In[8]:
+# In[9]:
 
 
 data_helper.LANG.n_chars
 
 
-# In[9]:
+# In[21]:
 
 
 parameters = {
@@ -101,26 +107,47 @@ parameters = {
     'decoder_n_layers' : 2, 
     'decoder_mlp_hidden_size' : 256,
     'decoder_padding_value' : char_language_model.EOS_token,
-    'GUMBEL_SOFTMAX' :False
+    'GUMBEL_SOFTMAX' :False,
+    'batch_size' : 64, 
+    'INIT_STATE' : False
 }
 # use eos token to pad
 # use the vocab_size as the padding value for label embedding and pad_sequence; 
 # cannot use -1 for label, which will cause error in criterion
 
 
-# In[10]:
+# In[22]:
 
 
-model = sequence2sequence_Atten_modules_withgumbel.Sequence2Sequence(**parameters) 
+model = s2s_controller.Sequence2Sequence(**parameters) 
 
 
-# In[11]:
+# In[23]:
 
 
 model
 
 
-# In[12]:
+# In[84]:
+
+
+# initialize the bias of the last linear layer with char prob distribution
+model.state_dict().keys()
+
+char_distribution = {i: data_helper.LANG.char2count[i]/sum(data_helper.LANG.char2count.values()) for i in data_helper.LANG.char2count}
+
+decoder_fc2_bias = [np.mean(list(char_distribution.values())), np.mean(list(char_distribution.values()))]
+
+decoder_fc2_bias
+
+decoder_fc2_bias = decoder_fc2_bias + [char_distribution[data_helper.LANG.index2char[i]] for i in range(34) if i not in [0,1]]
+
+len(decoder_fc2_bias)
+
+model.decoder.mlp.fc2.bias = torch.nn.Parameter(torch.tensor(decoder_fc2_bias))
+
+
+# In[24]:
 
 
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -128,13 +155,13 @@ optimizer = optim.Adam(model.parameters(), lr=1e-3)
 best_epoch, best_vali_loss, starting_epoch = 0, 400, 0
 
 
-# In[13]:
+# In[25]:
 
 
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.01, patience=1, verbose=True)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=1, verbose=True)
 
 
-# In[14]:
+# In[26]:
 
 
 criterion = nn.CrossEntropyLoss(reduction='none')
@@ -142,51 +169,51 @@ criterion = nn.CrossEntropyLoss(reduction='none')
 validation_criterion = nn.CrossEntropyLoss(reduction='none') # validation uses hard label ground truth to calculate loss
 
 
-# In[17]:
+# In[27]:
 
 
 output_path = os.path.join(paths.output_path, 'experiment_baseline_outputs')
 
 
-# In[15]:
+# In[28]:
 
 
-# proceeding from old models
-model_path = os.path.join(output_path, 'baseline_s2s_5.pth.tar')
-print("=> loading checkpoint '{}'".format(model_path))
-checkpoint = torch.load(model_path)
-starting_epoch = checkpoint['epoch']+1
-# best_vali_acc = checkpoint['best_vali_acc']
-model_state_dict = checkpoint['model_state_dict']
-model.load_state_dict(model_state_dict)
-optimizer.load_state_dict(checkpoint['optimizer_label_state_dict'])
-best_vali_loss = checkpoint['best_vali_loss']
-best_epoch = checkpoint['best_epoch']
-print("=> loaded checkpoint '{}' (epoch {})"
-      .format(model_path, checkpoint['epoch']))
-# del checkpoint, model_state_dict
+# # proceeding from old models
+# model_path = os.path.join(output_path, 'baseline_s2s_19.pth.tar')
+# print("=> loading checkpoint '{}'".format(model_path))
+# checkpoint = torch.load(model_path)
+# starting_epoch = checkpoint['epoch']+1
+# # best_vali_acc = checkpoint['best_vali_acc']
+# model_state_dict = checkpoint['model_state_dict']
+# model.load_state_dict(model_state_dict)
+# optimizer.load_state_dict(checkpoint['optimizer_label_state_dict'])
+# best_vali_loss = checkpoint['best_vali_loss']
+# best_epoch = checkpoint['best_epoch']
+# print("=> loaded checkpoint '{}' (epoch {})"
+#       .format(model_path, checkpoint['epoch']))
+# # del checkpoint, model_state_dict
 
 
-# In[ ]:
+# In[29]:
 
 
-for state in optimizer.state.values():
-    for k, v in state.items():
-        if isinstance(v, torch.Tensor):
-            state[k] = v.cuda()
+# for state in optimizer.state.values():
+#     for k, v in state.items():
+#         if isinstance(v, torch.Tensor):
+#             state[k] = v.cuda()
 
 
-# In[16]:
+# In[85]:
 
 
-init_TEACHER_FORCING_Ratio=0.9
-decay_scheduler = decay.BasicDecay(initial_rate=init_TEACHER_FORCING_Ratio, anneal_rate=0.8, min_rate=0, every_step=5, mode='step')
+init_TEACHER_FORCING_Ratio=0.95
+decay_scheduler = decay.BasicDecay(initial_rate=init_TEACHER_FORCING_Ratio, anneal_rate=0.9, min_rate=0.8, every_step=5, mode='step')
 
 for i in range(20):
     print(decay_scheduler.get_rate(i))
 
 
-# In[ ]:
+# In[20]:
 
 
 with SummaryWriter(os.path.join(output_path, "tensorboard_logs/train_pytorch"), comment='training') as tLog, SummaryWriter(os.path.join(output_path, "tensorboard_logs/val_pytorch"), comment='testing') as vLog: 
@@ -210,7 +237,7 @@ with SummaryWriter(os.path.join(output_path, "tensorboard_logs/train_pytorch"), 
                                 output_path=output_path)
 
 
-# In[17]:
+# In[21]:
 
 
 # %pdb
@@ -231,7 +258,7 @@ with SummaryWriter(os.path.join(output_path, "tensorboard_logs/train_pytorch"), 
 
 # # Validation
 
-# In[28]:
+# In[22]:
 
 
 # %pdb
@@ -244,13 +271,7 @@ with SummaryWriter(os.path.join(output_path, "tensorboard_logs/train_pytorch"), 
 #                                                   DEVICE = DEVICE)
 
 
-# In[29]:
-
-
-# 757/64
-
-
-# In[18]:
+# In[23]:
 
 
 # %%time
@@ -261,20 +282,25 @@ with SummaryWriter(os.path.join(output_path, "tensorboard_logs/train_pytorch"), 
 #                                                                       valid_dataloader = val_loader, 
 #                                                                       language_model = data_helper.LANG, 
 #                                                                       DEVICE = DEVICE, 
-#                                                                         MAX_SEQ_LEN=500, 
-#                                                                         N_CANDIDATES=10))
+#                                                                       MAX_SEQ_LEN=500, 
+#                                                                         N_CANDIDATES=100))
+
+
+# In[18]:
+
 
 
 # # Testing
 
-# In[60]:
+# In[24]:
 
 
-# for epoch in [20]:
+# %pdb
+# for epoch in [16,17,18,19,20]:
 #     # checkpoint = torch.load("checkpoint.pt")
-#     model_prediction = sequence2sequence_Atten_modules_withgumbel.Sequence2Sequence(**parameters) 
+#     model_prediction = s2s_controller.Sequence2Sequence(**parameters) 
 #     # proceeding from old models
-#     model_path = os.path.join(paths.output_path, 'baseline_s2s_'+str(epoch)+'.pth.tar')
+#     model_path = os.path.join(output_path, 'baseline_s2s_'+str(epoch)+'.pth.tar')
 #     print("=> loading checkpoint '{}'".format(model_path))
 #     checkpoint = torch.load(model_path)
 #     starting_epoch = checkpoint['epoch']+1
@@ -289,14 +315,46 @@ with SummaryWriter(os.path.join(output_path, "tensorboard_logs/train_pytorch"), 
 #     print('val_loss:%.4f val_distance:%.4f' % (checkpoint['val_loss'], checkpoint['val_distance']))
 
 #     model_prediction = model_prediction.to(DEVICE)
-#     references = trainer_with_tensorboar_inference.inference(model_prediction, test_loader,language_model=data_helper.LANG, MAX_SEQ_LEN=500)
+# #     references = trainer_with_tensorboar_inference.inference(model_prediction, test_loader,language_model=data_helper.LANG, MAX_SEQ_LEN=500)
+#     references = trainer_with_tensorboar_inference.inference_random_search(model_prediction, test_loader,language_model=data_helper.LANG, validation_criterion=validation_criterion, DEVICE=DEVICE, MAX_SEQ_LEN=500, N_CANDIDATES=100, GUMBEL_T=1.2)
 #     import pandas as pd
 #     varification_results_df = pd.DataFrame({'Id':np.arange(test_loader.dataset.size), 'Predicted':np.array(references)})
 
-#     varification_results_df.to_csv(os.path.join(paths.output_path, 'submission_'+'baseline_greedy_'+str(epoch)+'.csv'),index=False)
+#     varification_results_df.to_csv(os.path.join(paths.output_path, 'submission_'+'baseline_random_'+str(epoch)+'.csv'),index=False)
 
 
-# In[30]:
+# In[25]:
+
+
+# %pdb
+# for epoch in [16,17,18,19]:
+#     # checkpoint = torch.load("checkpoint.pt")
+#     model_prediction = s2s_controller.Sequence2Sequence(**parameters) 
+#     # proceeding from old models
+#     model_path = os.path.join(output_path, 'baseline_s2s_'+str(epoch)+'.pth.tar')
+#     print("=> loading checkpoint '{}'".format(model_path))
+#     checkpoint = torch.load(model_path)
+#     starting_epoch = checkpoint['epoch']+1
+#     model_state_dict = checkpoint['model_state_dict']
+#     model_prediction.load_state_dict(model_state_dict)
+#     # optimizer.load_state_dict(checkpoint['optimizer_label_state_dict'])
+#     best_vali_loss = checkpoint['best_vali_loss']
+#     best_epoch = checkpoint['best_epoch']
+#     print("=> loaded checkpoint '{}' (epoch {})"
+#           .format(model_path, checkpoint['epoch']))
+
+#     print('val_loss:%.4f val_distance:%.4f' % (checkpoint['val_loss'], checkpoint['val_distance']))
+
+#     model_prediction = model_prediction.to(DEVICE)
+# #     references = trainer_with_tensorboar_inference.inference(model_prediction, test_loader,language_model=data_helper.LANG, MAX_SEQ_LEN=500)
+#     references = trainer_with_tensorboar_inference.inference_beam_search(model_prediction, test_loader,language_model=data_helper.LANG, MAX_SEQ_LEN=500, beam_size=5, num_candidates=1)
+#     import pandas as pd
+#     varification_results_df = pd.DataFrame({'Id':np.arange(test_loader.dataset.size), 'Predicted':np.array(references)})
+
+#     varification_results_df.to_csv(os.path.join(paths.output_path, 'submission_'+'baseline_beam_'+str(epoch)+'.csv'),index=False)
+
+
+# In[ ]:
 
 
 # %pdb

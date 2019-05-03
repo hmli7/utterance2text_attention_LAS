@@ -24,15 +24,18 @@ class Data():
             data_path = paths.train_data_path
             labels_path = paths.train_labels_path
             shuffle = True
+            drop_last = True # when trainning, we need to drop the last imcomplete batch because we need a fix batch_size through training
         if mode == "val":
             data_path = paths.valid_data_path
             labels_path = paths.valid_labels_path
             shuffle = False
+            drop_last = False
         if mode == "test":
             data_path = paths.test_data_path
             labels_path = None
             shuffle = False
             batch_size = config.test_batch_size
+            drop_last = False
         
         # load data
         data = np.load(data_path, encoding='bytes')
@@ -55,7 +58,7 @@ class Data():
     #         dataset = TensorDataset(torch.tensor(data, dtype=torch.float))
             dataset = UtteranceDataset.FrameDataset(data)
 
-        dataloader = DataLoader(dataset, shuffle=shuffle, batch_size=batch_size, drop_last=False, num_workers=0, collate_fn=self.collate_fn) # multiprocessing set to 0 because the data is already on GPU; putting data onto GPU in dataset because various length and we are using customized collate function. if using multiprocessing, need to manually iterate through one batch of data, put them onto gpu before putting input model.
+        dataloader = DataLoader(dataset, shuffle=shuffle, batch_size=batch_size, drop_last=drop_last, num_workers=0, collate_fn=self.collate_fn) # multiprocessing set to 0 because the data is already on GPU; putting data onto GPU in dataset because various length and we are using customized collate function. if using multiprocessing, need to manually iterate through one batch of data, put them onto gpu before putting input model.
         
         return dataloader
 

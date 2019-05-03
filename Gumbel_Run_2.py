@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[2]:
+# In[1]:
 
 
 import numpy as np
@@ -14,13 +14,13 @@ import matplotlib.pyplot as plt
 # %matplotlib inline
 
 
-# In[3]:
+# In[2]:
 
 
 from loss import *
 
 
-# In[4]:
+# In[3]:
 
 
 import paths
@@ -34,7 +34,7 @@ import trainer, trainer_with_tensorboar, trainer_with_tensorboar_inference
 import char_language_model
 
 
-# In[5]:
+# In[4]:
 
 
 reload_packages = [paths, util, config, data, decay, s2s_controller, trainer, trainer_with_tensorboar, trainer_with_tensorboar_inference, char_language_model]
@@ -43,13 +43,13 @@ for package in reload_packages:
 # importlib.reload(data)
 
 
-# In[6]:
+# In[5]:
 
 
 from tensorboardX import SummaryWriter
 
 
-# In[7]:
+# In[6]:
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -58,13 +58,13 @@ DEVICE
 
 # # Load Data
 
-# In[8]:
+# In[7]:
 
 
 data_helper = data.Data()
 
 
-# In[9]:
+# In[8]:
 
 
 train_loader = data_helper.get_loader(mode='train')
@@ -82,7 +82,7 @@ test_loader = data_helper.get_loader(mode='test')
 #     - [ ] freeze the pretrained part
 #     - [ ] unfreeze the pretrained part
 
-# In[10]:
+# In[9]:
 
 
 # for child in model_ft.children():
@@ -94,13 +94,13 @@ test_loader = data_helper.get_loader(mode='test')
 
 # # Define model
 
-# In[11]:
+# In[10]:
 
 
 data_helper.LANG.n_chars
 
 
-# In[12]:
+# In[11]:
 
 
 parameters = {
@@ -124,19 +124,19 @@ parameters = {
 # cannot use -1 for label, which will cause error in criterion
 
 
-# In[13]:
+# In[12]:
 
 
 model = s2s_controller.Sequence2Sequence(**parameters) 
 
 
-# In[14]:
+# In[13]:
 
 
 model
 
 
-# In[15]:
+# In[14]:
 
 
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -144,13 +144,13 @@ optimizer = optim.Adam(model.parameters(), lr=1e-3)
 best_epoch, best_vali_loss, starting_epoch = 0, 400, 0
 
 
-# In[16]:
+# In[15]:
 
 
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=1, verbose=True)
 
 
-# In[17]:
+# In[16]:
 
 
 criterion = nn.CrossEntropyLoss(reduction='none')
@@ -158,7 +158,7 @@ criterion = nn.CrossEntropyLoss(reduction='none')
 validation_criterion = nn.CrossEntropyLoss(reduction='none') # validation uses hard label ground truth to calculate loss
 
 
-# In[18]:
+# In[17]:
 
 
 output_path = os.path.join(paths.output_path, 'experiment_gumbel_outputs')
@@ -192,19 +192,20 @@ output_path = os.path.join(paths.output_path, 'experiment_gumbel_outputs')
 #             state[k] = v.cuda()
 
 
-# In[21]:
+# In[20]:
 
 
-init_TEACHER_FORCING_Ratio=0.9
-decay_scheduler = decay.BasicDecay(initial_rate=init_TEACHER_FORCING_Ratio, anneal_rate=0.98, min_rate=0, every_step=5, mode='step')
+init_TEACHER_FORCING_Ratio=1
+decay_scheduler = decay.BasicDecay(initial_rate=init_TEACHER_FORCING_Ratio, anneal_rate=0.9, min_rate=0.8, every_step=5, mode='step')
 
-for i in range(30):
+for i in range(20):
     print(decay_scheduler.get_rate(i))
 
 
-# In[22]:
+# In[21]:
 
 
+# %pdb
 with SummaryWriter(os.path.join(output_path, "tensorboard_logs/train_pytorch"), comment='training') as tLog, SummaryWriter(os.path.join(output_path, "tensorboard_logs/val_pytorch"), comment='testing') as vLog: 
 #     tLog.add_graph(model, test_input, True)
     trainer_with_tensorboar_inference.run(model = model,

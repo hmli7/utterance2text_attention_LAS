@@ -445,6 +445,97 @@ def test_validation_random_search(model, validation_criterion, valid_dataloader,
         
     return avg_loss/num_batches, avg_distance/num_batches, avg_perplexity/num_batches
 
+def test_validation_beam_search(model, validation_criterion, valid_dataloader, language_model, DEVICE, MAX_SEQ_LEN=500, beam_size=5, num_candidates=1):
+    if PROMPT:
+        print('## Start validating....')
+    model.eval()
+    num_batches = len(valid_dataloader)
+    avg_loss = 0.0
+    avg_distance = 0.0
+    avg_perplexity = 0.0
+
+    for idx,  (data_batch, label_batch) in enumerate(valid_dataloader):
+        
+        predictions, prediction_labels, sorted_labels, labels_lens, _ = model(
+            data_batch, TEACHER_FORCING_Ratio=None, TEST=False, VALIDATE=True, NUM_CONFIG=(MAX_SEQ_LEN, beam_size, num_candidates), SEARCH_MODE='beam_search')  # N, max_label_L, vocab_size; N, max_label_L; with grad; predict till EOS; NUM_CONFIG == MAX_SEQ_LEN
+        
+        
+        if len(sorted_labels)==2:
+            # the model returns true labels and smoothed onehot targets
+            true_sorted_labels, gumbel_true_labels = sorted_labels
+        else:
+            true_sorted_labels = sorted_labels
+        
+        # mask for cross entropy loss
+        batch_size = len(data_batch)
+
+        batch_loss = 0.0
+        batch_perplexity = 0.0
+
+        
+        for utterance_index, utterance_pred_residual in enumerate(predictions):
+            utterance_pred_label = prediction_labels[utterance_index]
+            # slice the label to the length where the model was trying to end for one utterance
+            if char_language_model.EOS_token in utterance_pred_label: # there exists EOS, use the first 1 as the end of sentence; the model will return a matrix, with the width of the last ended prediction
+                end_position = utterance_pred_label.detach().cpu().numpy().tolist().index(char_language_model.EOS_token)
+                if end_position < len(utterance_pred_label): # not the last one
+                    utterance_pred = utterance_pred_residual[:end_position+1]
+                else:
+                    utterance_pred = utterance_pred_residual
+            else:
+                utterance_pred = utterance_pred_residual # if no EOS, use the entire prediction
+            
+            # pad to reach the same time length
+            utterance_padded_label = true_sorted_labels[utterance_index] # max_label_len
+            if utterance_pred.size(0) < utterance_padded_label.size(0):
+                # pad utterance pred
+                pred_pad = (0,0,0,utterance_padded_label.size(0)-utterance_pred.size(0)) # pad the second last dim with 0
+                utterance_pred = F.pad(utterance_pred, pred_pad, mode='constant', value=0)
+            elif utterance_padded_label.size(0) < utterance_pred.size(0):
+                # pad utterance label
+                pad = ((0,utterance_pred.size(0)-utterance_padded_label.size(0)))
+                utterance_padded_label = F.pad(utterance_padded_label, pad, mode='constant', value=char_language_model.EOS_token)
+                utterance_padded_label.requires_grad = False
+            assert utterance_padded_label.size(0) == utterance_pred.size(0)
+            utterance_mask = (torch.arange(0, utterance_padded_label.size(0)) < torch.tensor(labels_lens[utterance_index])).float().to(DEVICE)
+            utterance_mask.requires_grad = False
+
+#             pdb.set_trace()
+            # N,1 | N,L,Hidden_size
+            utterance_loss = validation_criterion(utterance_pred, utterance_padded_label.to(DEVICE)) * utterance_mask
+            batch_loss += utterance_loss.sum() # use sum to punish long
+            utterance_perplexity = utterance_loss.sum()/utterance_mask.sum()
+            batch_perplexity += utterance_perplexity
+            
+
+#         batch_loss = validation_criterion.forward(predictions.permute(0,2,1), sorted_labels.to(DEVICE)) #(N,C,d1) & (N,d1)
+#         batch_loss = batch_loss * prediction_mask
+        loss = batch_loss.sum()/batch_size # loss per instance used for train
+        perplexity_loss = torch.exp(batch_perplexity.sum()/batch_size).detach().cpu() # perplexity
+
+        SHOW_RESULT = False # whether print out the prediction result while calculating distance 
+        if idx % 50 == 49:
+            SHOW_RESULT = True
+        # distance
+        distance = evaluate_distance(prediction_labels.detach().cpu().numpy(), true_sorted_labels.detach().cpu().numpy(), labels_lens, language_model, SHOW_RESULT)
+        
+        avg_loss += loss.detach().cpu().item()
+        avg_distance += distance
+        avg_perplexity += perplexity_loss
+        
+        # clear memory
+        data_batch = [data.detach() for data in data_batch]
+        label_batch = [label.detach() for label in label_batch]
+        predictions = predictions.detach()
+        loss = loss.detach()
+        batch_loss = batch_loss.detach()
+        del data_batch, label_batch
+        del predictions
+        del loss, batch_loss, perplexity_loss
+        torch.cuda.empty_cache()
+    
+    return avg_loss/num_batches, avg_distance/num_batches, avg_perplexity/num_batches
+
 def inference(model, test_dataloader,language_model, MAX_SEQ_LEN=500):
     print('## Start inferencing....')
     model.eval()
