@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd import Variable
 import random
 import char_language_model
 
@@ -12,6 +13,18 @@ import pdb
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+class LockedDropout(nn.Module):
+    '''source: https://medium.com/@bingobee01/a-review-of-dropout-as-applied-to-rnns-72e79ecd5b7b'''
+    def __init__(self):
+        super().__init__()
+    def forward(self, x, dropout=0.5):
+        if not self.training or not dropout or dropout == 0:
+            return x
+        mask = x.data.new(1, x.size(1), x.size(2)).bernoulli_(1 - dropout)
+        mask = Variable(mask, requires_grad=False) / (1 - dropout)
+        mask = mask.expand_as(x)
+        return mask * x
+    
 
 class Encoder_RNN(nn.Module):
     def __init__(self, embed_size, hidden_size, n_layers, n_plstm, mlp_hidden_size, mlp_output_size):
@@ -47,7 +60,7 @@ class Encoder_RNN(nn.Module):
 #         sorted_sequence_lens = sorted_sequence_lens.to(DEVICE)
 #         labels = labels.to(DEVICE)
         # pad sequence
-        x = pad_sequence(x)
+        x = pad_sequence(x) # L, N, H
         x = pack_padded_sequence(x, sorted_sequence_lens)
         for rnn in self.rnns:
             x, _ = rnn(x)  # L/8, B, hidden_size * 2
@@ -67,10 +80,12 @@ class pBLSTM(nn.Module):
         super(pBLSTM, self).__init__()
         self.lstm = nn.LSTM(
             input_size=input_dim*2, hidden_size=hidden_size, num_layers=1, bidirectional=True)
+        self.locked_dropout = LockedDropout()
 
     def forward(self, x):
         # unpack
         x, sorted_sequence_lens = pad_packed_sequence(x)  # L, B, F
+        x = self.locked_dropout(x, dropout=0.2) # L, N, H
         seq_length, batch_size, feature_dim = x.size()
 
         # change original sequence lengths

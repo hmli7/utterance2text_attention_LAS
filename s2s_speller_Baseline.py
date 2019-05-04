@@ -17,7 +17,7 @@ class MLP(nn.Module):
     def __init__(self, input_dim, hidden_size, output_dim):
         super(MLP, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_size)
-        self.relu = nn.LeakyReLU(negative_slope=0.9, inplace=False)
+        self.relu = nn.LeakyReLU(negative_slope=0.5, inplace=False)
         self.fc2 = nn.Linear(hidden_size, output_dim)
 
     def forward(self, x):
@@ -25,7 +25,7 @@ class MLP(nn.Module):
         x = self.relu(x)
         x = self.fc2(x)
         return x
-
+    
 
 class Attention(nn.Module):
     '''different mechanisms to get attention
@@ -108,6 +108,10 @@ class Decoder_RNN(nn.Module):
         # fc layer
         self.mlp = MLP(self.key_value_size*2, mlp_hidden_size, self.vocab_size)
 #         self.fc2 = nn.Linear(self.key_value_size*2, self.vocab_size)
+
+        # weight tying
+        self.embedding.weight = self.mlp.fc2.weight
+        self.embedding.bias = self.mlp.fc2.bias
 
     def detach_states(self):
         '''detach states initiated in the beginning after each batch'''
@@ -429,18 +433,19 @@ class Decoder_RNN(nn.Module):
 
         # ------ Init ------
         # initialize attention, hidden states, memory states
+        # use the true key to initialize because of various batch size
         attention_context = self.init_states(key, hidden_size=key.size(2))  # N, Key/query_len
         # initialize hidden and memory states
         # initialize hidden and memory states
-        self.hidden_states = [self.init_states(key)]  # N, hidden_size
-        self.memory_states = [self.init_states(key)]  # N, hidden_size
+        hidden_states = [self.init_states(key)]  # N, hidden_size
+        memory_states = [self.init_states(key)]  # N, hidden_size
         # hidden = [num layers * num directions, batch size, hid dim]
         # cell = [num layers * num directions, batch size, hid dim]
         for i in range(self.n_layers-1):
             # we use single direction lstm cell in this case
-            self.hidden_states.append(self.init_states(key))
+            hidden_states.append(self.init_states(key))
             # [n_layers, N, Hidden_size]
-            self.memory_states.append(self.init_states(key))
+            memory_states.append(self.init_states(key))
 
         max_label_len = MAX_SEQ_LEN
         
@@ -475,15 +480,15 @@ class Decoder_RNN(nn.Module):
             # decide whether to use teacher forcing in this time step
     
             # rnn
-            self.hidden_states[0], self.memory_states[0] = self.rnns[0](
-                rnn_input, (self.hidden_states[0], self.memory_states[0])
+            hidden_states[0], memory_states[0] = self.rnns[0](
+                rnn_input, (hidden_states[0], memory_states[0])
             )
 
             for hidden_layer in range(1, self.n_layers):
-                self.hidden_states[hidden_layer], self.memory_states[hidden_layer] = self.rnns[hidden_layer](
-                    self.hidden_states[hidden_layer - 1], (self.hidden_states[hidden_layer], self.memory_states[hidden_layer])
+                hidden_states[hidden_layer], memory_states[hidden_layer] = self.rnns[hidden_layer](
+                    hidden_states[hidden_layer - 1], (hidden_states[hidden_layer], memory_states[hidden_layer])
                 )
-            rnn_output = self.hidden_states[-1]  # N, hidden_size
+            rnn_output = hidden_states[-1]  # N, hidden_size
             
             query = self.fc(rnn_output.unsqueeze(1)) # N, query_len, key_value_size
 

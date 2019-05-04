@@ -542,7 +542,7 @@ def inference(model, test_dataloader,language_model, MAX_SEQ_LEN=500):
     num_batches = len(test_dataloader)
     inferences = []
     for idx,  data_batch in enumerate(test_dataloader):
-        predictions, prediction_labels, reverse_sequence_order = model(
+        predictions, prediction_labels, _, reverse_sequence_order = model(
             data_batch, TEACHER_FORCING_Ratio=None, TEST=True, VALIDATE=False, NUM_CONFIG=MAX_SEQ_LEN, SEARCH_MODE='greedy')  # N, max_label_L, vocab_size; N, max_label_L; with grad; predict till EOS; NUM_CONFIG == MAX_SEQ_LEN
         
         # change label indexes to sentences
