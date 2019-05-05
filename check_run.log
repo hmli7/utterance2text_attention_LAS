@@ -1,0 +1,32 @@
+Batch Size:  64
+Preparing corpus...
+(24724,) (24724,)
+Dataset Device: cuda
+Batch Size:  64
+Preparing corpus...
+(1106,) (1106,)
+Dataset Device: cuda
+Batch Size:  64
+Dataset Device: cuda
+=> loading checkpoint '../outputs/baseline_s2s_21.pth.tar'
+=> loaded checkpoint '../outputs/baseline_s2s_21.pth.tar' (epoch 21)
+val_loss:594.3322 val_distance:9.9466
+## Start inferencing....
+=> loading checkpoint '../outputs/baseline_s2s_21.pth.tar'
+=> loaded checkpoint '../outputs/baseline_s2s_21.pth.tar' (epoch 21)
+val_loss:594.3322 val_distance:9.9466
+## Start inferencing....
+=> loading checkpoint '../outputs/baseline_s2s_21.pth.tar'
+=> loaded checkpoint '../outputs/baseline_s2s_21.pth.tar' (epoch 21)
+val_loss:594.3322 val_distance:9.9466
+## Start inferencing....
+Traceback (most recent call last):
+  File "/opt/anaconda3/lib/python3.7/multiprocessing/resource_sharer.py", line 149, in _serve
+    send(conn, destination_pid)
+  File "/opt/anaconda3/lib/python3.7/multiprocessing/resource_sharer.py", line 50, in send
+    reduction.send_handle(conn, new_fd, pid)
+  File "/opt/anaconda3/lib/python3.7/multiprocessing/reduction.py", line 179, in send_handle
+    with socket.fromfd(conn.fileno(), socket.AF_UNIX, socket.SOCK_STREAM) as s:
+  File "/opt/anaconda3/lib/python3.7/socket.py", line 463, in fromfd
+    nfd = dup(fd)
+OSError: [Errno 24] Too many open files

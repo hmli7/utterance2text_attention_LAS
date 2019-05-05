@@ -18,7 +18,7 @@ import char_language_model
 
 import pdb
 
-from tensorboardX import SummaryWriter
+# from tensorboardX import SummaryWriter
 
 import OneStepBeam
 import multiprocessing as m
@@ -675,7 +675,6 @@ def inference_fast_beam_search(model, model_reference, test_dataloader, language
     num_batches = len(test_dataloader)
     all_values, all_keys, all_sequence_lens = [], [], []
     
-    test = 0
 
     # generate key and value pairs for all instances, unsort the sequence
     for idx,  data_batch in enumerate(test_dataloader):
@@ -691,9 +690,6 @@ def inference_fast_beam_search(model, model_reference, test_dataloader, language
         del data_batch
         torch.cuda.empty_cache()
         
-        test+=1
-        if test == 2:
-            break
     # initialize one step beam class
     # do this one cpu
     one_step_beam = OneStepBeam.OneStepBeam(
@@ -707,7 +703,7 @@ def inference_fast_beam_search(model, model_reference, test_dataloader, language
     # do beam search with multiprocessing
     pool = m.Pool(m.cpu_count())
     results = pool.map(one_step_beam.do_one_step, zip(
-        all_keys[:2], all_values[:2], all_sequence_lens[:2]))  # [[y_hat, decoded_prediction, attention]]
+        all_keys, all_values, all_sequence_lens))  # [[y_hat, decoded_prediction, attention]]
 
     return results
 

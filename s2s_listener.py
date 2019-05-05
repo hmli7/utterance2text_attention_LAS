@@ -11,20 +11,10 @@ import util
 
 import pdb
 
+from dropouts import LockedDropout, WeightDrop
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-class LockedDropout(nn.Module):
-    '''source: https://medium.com/@bingobee01/a-review-of-dropout-as-applied-to-rnns-72e79ecd5b7b'''
-    def __init__(self):
-        super().__init__()
-    def forward(self, x, dropout=0.5):
-        if not self.training or not dropout or dropout == 0:
-            return x
-        mask = x.data.new(1, x.size(1), x.size(2)).bernoulli_(1 - dropout)
-        mask = Variable(mask, requires_grad=False) / (1 - dropout)
-        mask = mask.expand_as(x)
-        return mask * x
-    
 
 class Encoder_RNN(nn.Module):
     def __init__(self, embed_size, hidden_size, n_layers, n_plstm, mlp_hidden_size, mlp_output_size):
