@@ -750,7 +750,9 @@ class Decoder_RNN(nn.Module):
                     beam_nodes_candidates.append(new_beam_node)
                 
                 # rank by prob
-                beam_nodes_candidates = sorted(beam_nodes_candidates, key=lambda x: x['prob'], reverse=True)[:beam_size]
+                # source: https://arxiv.org/pdf/1609.08144.pdf
+                beam_nodes_candidates = sorted(beam_nodes_candidates, key=lambda x: x['prob']/(
+                    (((5+len(x['y_hats']))**0.6))/((5+1)**0.6)), reverse=True)[:beam_size]
 
             beam_nodes = beam_nodes_candidates
             if time_index == max_label_len-1:
@@ -769,7 +771,8 @@ class Decoder_RNN(nn.Module):
                 # stop decoding
                 break
         # need to detach y_hat_label in each beam node to free memory
-        return sorted(stopped_beam_nodes, key=lambda x: x['prob'], reverse=True)[:min(len(stopped_beam_nodes), num_candidates)]
+        return sorted(stopped_beam_nodes, key=lambda x: x['prob']/(
+            (((5+len(x['y_hats']))**0.6))/((5+1)**0.6)), reverse=True)[:min(len(stopped_beam_nodes), num_candidates)]
     
     def inference_beam_search(self, argument_list):
         """inference with beam search"""

@@ -20,6 +20,9 @@ import pdb
 
 from tensorboardX import SummaryWriter
 
+import OneStepBeam
+import multiprocessing as m
+
 
 def run(model, optimizer, criterion, validation_criterion, train_dataloader, valid_dataloader, language_model, best_epoch, best_vali_loss, DEVICE, tLog, vLog, teacher_forcing_scheduler, scheduler=None, start_epoch=None, model_prefix=config.model_prefix, NUM_CONFIG=0, TRAIN_SEARCH_MODE='greedy', output_path=None):
     best_eval = None
@@ -661,6 +664,44 @@ def inference_beam_search(model, test_dataloader,language_model, MAX_SEQ_LEN=500
         torch.cuda.empty_cache()
         
     return inferences
+
+
+def inference_fast_beam_search(model, test_dataloader, language_model, MAX_SEQ_LEN=500, beam_size=5, num_candidates=1):
+    '''use encoder to generate key and value pairs for all test data and use cpu multiprocessing to do beam search'''
+    print('## Start inferencing....')
+    model.eval()
+    num_batches = len(test_dataloader)
+    all_values, all_keys, all_sequence_lens = [], [], []
+
+    # generate key and value pairs for all instances, unsort the sequence
+    for idx,  data_batch in enumerate(test_dataloader):
+        TEST=True
+        encoder_argument_list = [data_batch, TEST]
+        keys, values, final_seq_lens, sequence_order, reverse_sequence_order = model.encoder(encoder_argument_list)
+        all_values.extend(np.array([value.detach().cpu() for value in values])[reverse_sequence_order])
+        all_keys.extend(np.array([key.detach().cpu()
+                                  for key in keys])[reverse_sequence_order])
+        all_sequence_lens.extend(np.array([sequence_len.detach().cpu(
+        ) for sequence_len in final_seq_lens])[reverse_sequence_order])
+
+        # clear memory
+        data_batch = [data.detach() for data in data_batch]
+        del data_batch
+        torch.cuda.empty_cache()
+    
+    # initialize one step beam class
+    # do this one cpu
+    one_step_beam = OneStepBeam(
+        model.cpu(), char_language_model.SOS_token, char_language_model.EOS_token, MAX_SEQ_LEN, beam_size, num_candidates)
+
+    # three list contains total number of key, value, and sequence length for each utterance
+    # do beam search with multiprocessing
+    pool = m.Pool(m.cpu_count())
+    results = pool.map(one_step_beam.do_one_step, zip(
+        all_keys, all_values, all_sequence_lens))  # [[y_hat, decoded_prediction, attention]]
+
+    return results
+
 
 def evaluate_distance(predictions, padded_label, label_lens, lang, SHOW_RESULT=False, RETURN_UTTERANCE_DISTANCE=False):
     """ predictions: N, Max_len
