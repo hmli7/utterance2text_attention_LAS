@@ -62,7 +62,7 @@ class Attention(nn.Module):
 
 
 class Decoder_RNN(nn.Module):
-    def __init__(self, vocab_size, embed_size, key_value_size, hidden_size, n_layers, mlp_hidden_size, padding_value, batch_size=64, INIT_STATE=True):
+    def __init__(self, vocab_size, embed_size, key_value_size, hidden_size, n_layers, mlp_hidden_size, padding_value, batch_size=64, INIT_STATE=True, device=DEVICE):
         super(Decoder_RNN, self).__init__()
         '''the INIT_STATE parameter controls whether init the hidden and memory cell each batch; if not, then we can only use fix batch size'''
         self.hidden_size = hidden_size
@@ -73,7 +73,7 @@ class Decoder_RNN(nn.Module):
         self.padding_value = padding_value
         self.INIT_STATE = INIT_STATE
         
-        dummy_key = torch.zeros(batch_size, 1, key_value_size).float().to(DEVICE) # a dummy key (output of encoder) for states initialization
+        dummy_key = torch.zeros(batch_size, 1, key_value_size).float().to(device) # a dummy key (output of encoder) for states initialization
         
         if not self.INIT_STATE:
             # if not init state each batch, we init them here
@@ -238,7 +238,7 @@ class Decoder_RNN(nn.Module):
         
         return y_hat, y_hat_label, labels_padded.permute(1,0), labels_lens, attentions
     
-    def beam_search_decode(self, utterance_key, utterance_value, utterance_label, utterance_seq_len, SOS_token, EOS_token, TEACHER_FORCING_Ratio, MAX_SEQ_LEN, beam_size, num_candidates):
+    def beam_search_decode(self, utterance_key, utterance_value, utterance_label, utterance_seq_len, SOS_token, EOS_token, TEACHER_FORCING_Ratio, MAX_SEQ_LEN, beam_size, num_candidates, DEVICE=DEVICE):
         '''do beam search decoding for training for one utterance a time
         source: https://github.com/kaituoxu/Listen-Attend-Spell/blob/master/src/models/decoder.py'''
         utterance_key = utterance_key.unsqueeze(0) # 1, key_len, key_hidden_size
@@ -645,7 +645,7 @@ class Decoder_RNN(nn.Module):
         # TODO: currently lazily return none for attentions for memory consideration
         return y_hat, y_hat_label, attentions
     
-    def beam_search_decode_inference(self, utterance_key, utterance_value, utterance_seq_len, SOS_token, EOS_token, max_label_len, beam_size, num_candidates):
+    def beam_search_decode_inference(self, utterance_key, utterance_value, utterance_seq_len, SOS_token, EOS_token, max_label_len, beam_size, num_candidates, device=DEVICE):
         '''do beam search decoding for training for one utterance a time
         source: https://github.com/kaituoxu/Listen-Attend-Spell/blob/master/src/models/decoder.py'''
         utterance_key = utterance_key.unsqueeze(0) # 1, key_len, key_hidden_size
@@ -671,12 +671,12 @@ class Decoder_RNN(nn.Module):
         max_key_len = utterance_key.size(1)
 
         key_mask = torch.arange(0, max_key_len).view(1,-1) < utterance_seq_len
-        key_mask = key_mask.unsqueeze(2).float().to(DEVICE)  # 1, max_key_len, 1
+        key_mask = key_mask.unsqueeze(2).float().to(device)  # 1, max_key_len, 1
         key_mask.requires_grad = False
 
         # ------ LAS ------
         # initialze for the first time step input
-        y_hat_t_label = torch.tensor(SOS_token).long().to(DEVICE)  # N
+        y_hat_t_label = torch.tensor(SOS_token).long().to(device)  # N
 
         start_beam_node = {
             'y_hat_t_labels':[y_hat_t_label],
@@ -689,6 +689,7 @@ class Decoder_RNN(nn.Module):
         }
         beam_nodes = [start_beam_node]
         stopped_beam_nodes = []
+        
 
         # iterate through max possible label length
         for time_index in range(max_label_len):
@@ -750,12 +751,14 @@ class Decoder_RNN(nn.Module):
                     beam_nodes_candidates.append(new_beam_node)
                 
                 # rank by prob
-                beam_nodes_candidates = sorted(beam_nodes_candidates, key=lambda x: x['prob'], reverse=True)[:beam_size]
+                # source: https://arxiv.org/pdf/1609.08144.pdf
+                beam_nodes_candidates = sorted(beam_nodes_candidates, key=lambda x: x['prob']/(
+                    (((5+len(x['y_hats']))**0.6))/((5+1)**0.6)), reverse=True)[:beam_size]
 
             beam_nodes = beam_nodes_candidates
             if time_index == max_label_len-1:
                 for beam_node in beam_nodes:
-                    beam_node['y_hat_t_labels'].append(torch.tensor(EOS_token).to(DEVICE))
+                    beam_node['y_hat_t_labels'].append(torch.tensor(EOS_token).to(device))
             
             left_beam_nodes = []
             for beam_node in beam_nodes:
@@ -769,7 +772,8 @@ class Decoder_RNN(nn.Module):
                 # stop decoding
                 break
         # need to detach y_hat_label in each beam node to free memory
-        return sorted(stopped_beam_nodes, key=lambda x: x['prob'], reverse=True)[:min(len(stopped_beam_nodes), num_candidates)]
+        return sorted(stopped_beam_nodes, key=lambda x: x['prob']/(
+            (((5+len(x['y_hats']))**0.6))/((5+1)**0.6)), reverse=True)[:min(len(stopped_beam_nodes), num_candidates)]
     
     def inference_beam_search(self, argument_list):
         """inference with beam search"""

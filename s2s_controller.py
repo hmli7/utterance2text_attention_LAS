@@ -20,7 +20,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 class Sequence2Sequence(nn.Module):
     def __init__(self, embed_size, hidden_size, n_layers, n_plstm, mlp_hidden_size, mlp_output_size,
-                 decoder_vocab_size, decoder_embed_size, decoder_hidden_size, decoder_n_layers, decoder_mlp_hidden_size, decoder_padding_value, GUMBEL_SOFTMAX=False, batch_size=64, INIT_STATE=True):
+                 decoder_vocab_size, decoder_embed_size, decoder_hidden_size, decoder_n_layers, decoder_mlp_hidden_size, decoder_padding_value, GUMBEL_SOFTMAX=False, batch_size=64, INIT_STATE=True, device=DEVICE):
         super(Sequence2Sequence, self).__init__()
         
         self.decoder_padding_value = decoder_padding_value
@@ -32,7 +32,7 @@ class Sequence2Sequence(nn.Module):
                 decoder_vocab_size, decoder_embed_size, mlp_output_size, decoder_hidden_size, decoder_n_layers, decoder_mlp_hidden_size, decoder_padding_value)
         else:
             self.decoder = Decoder_RNN(
-				decoder_vocab_size, decoder_embed_size, mlp_output_size, decoder_hidden_size, decoder_n_layers, decoder_mlp_hidden_size, decoder_padding_value, batch_size, INIT_STATE)
+				decoder_vocab_size, decoder_embed_size, mlp_output_size, decoder_hidden_size, decoder_n_layers, decoder_mlp_hidden_size, decoder_padding_value, batch_size, INIT_STATE, device)
 
     def forward(self, seq_batch, TEACHER_FORCING_Ratio=None, TEST=False, VALIDATE=False, NUM_CONFIG=0, SEARCH_MODE='greedy'):
         '''NUM_CONFIG means MAX_SEQ_LEN for greedy search, means (MAX_SEQ_LEN, N_CONDIDATES) for random search'''
