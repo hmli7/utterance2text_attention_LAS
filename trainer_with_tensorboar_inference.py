@@ -23,6 +23,8 @@ import pdb
 import OneStepBeam
 import multiprocessing as m
 
+from tqdm import tqdm
+
 
 def run(model, optimizer, criterion, validation_criterion, train_dataloader, valid_dataloader, language_model, best_epoch, best_vali_loss, DEVICE, tLog, vLog, teacher_forcing_scheduler, scheduler=None, start_epoch=None, model_prefix=config.model_prefix, NUM_CONFIG=0, TRAIN_SEARCH_MODE='greedy', output_path=None):
     best_eval = None
@@ -56,8 +58,9 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
         # update teacher forcing ratio
         TEACHER_FORCING_Ratio = teacher_forcing_scheduler.get_rate(epoch)
         
+        dataloader = tqdm(train_dataloader, total=len(train_dataloader))
         # lists, presorted, preloaded on GPU
-        for idx, (data_batch, label_batch) in enumerate(train_dataloader):
+        for idx, (data_batch, label_batch) in enumerate(dataloader):
             optimizer.zero_grad()
             predictions, prediction_labels, sorted_labels, labels_lens, batch_attention = model(
                 (data_batch, label_batch), TEACHER_FORCING_Ratio, TEST=False, NUM_CONFIG=NUM_CONFIG, SEARCH_MODE=TRAIN_SEARCH_MODE)  # N, max_label_L, vocab_size; N, max_label_L
@@ -138,23 +141,24 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
                 # plot attention
                 plot_single_attention(batch_attention[0].squeeze(0).cpu().numpy(), epoch, os.path.join(output_path, 'attention_plots'))
                 
-                # add log to tensorboard
-                # 1. Log scalar values (scalar summary)
-                tr_info = { 'loss': loss.cpu().detach().numpy(), 'perplexity': perplexity_loss.numpy(), 'distance': distance }
+                if tLog is not None:
+                    # add log to tensorboard
+                    # 1. Log scalar values (scalar summary)
+                    tr_info = { 'loss': loss.cpu().detach().numpy(), 'perplexity': perplexity_loss.numpy(), 'distance': distance }
 
-                for tag, value in tr_info.items():
-                    tLog.add_scalar(tag, value, global_iteration_index+1)
+                    for tag, value in tr_info.items():
+                        tLog.add_scalar(tag, value, global_iteration_index+1)
 
-                # 2. Log values and gradients of the parameters (histogram summary)
-                for tag, value in model.named_parameters():
-                    tag = tag.replace('.', '/')
-                    tLog.add_histogram(tag, value.data.cpu().numpy(), global_iteration_index+1)
-                    tLog.add_histogram(tag+'/grad', value.grad.data.cpu().numpy(), global_iteration_index+1)
+                    # 2. Log values and gradients of the parameters (histogram summary)
+                    for tag, value in model.named_parameters():
+                        tag = tag.replace('.', '/')
+                        tLog.add_histogram(tag, value.data.cpu().numpy(), global_iteration_index+1)
+                        tLog.add_histogram(tag+'/grad', value.grad.data.cpu().numpy(), global_iteration_index+1)
 
-                # 3. Log two visualizations
-                tLog.add_figure('attention_last_instance_batch', plot_single_attention_return(batch_attention[0].squeeze(0).cpu().numpy()), global_step=global_iteration_index+1)
-                tLog.add_figure('gradient_flow_batch', plot_grad_flow_return(model.named_parameters()), global_step=global_iteration_index+1)
-            global_iteration_index += 1
+                    # 3. Log two visualizations
+                    tLog.add_figure('attention_last_instance_batch', plot_single_attention_return(batch_attention[0].squeeze(0).cpu().numpy()), global_step=global_iteration_index+1)
+                    tLog.add_figure('gradient_flow_batch', plot_grad_flow_return(model.named_parameters()), global_step=global_iteration_index+1)
+                global_iteration_index += 1
 
             if idx % 100 == 99:
                 print_file_and_screen('Epoch: {}\tBatch: {}\tAvg-Loss: {:.4f}\tAvg-Perplexity: {:.4f}\tAvg-Distance: {:.4f}'.format(
@@ -182,12 +186,13 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
         print_file_and_screen('Train Loss: {:.4f}\tTrain Distance: {:.4f}\tTrain Perplexity: {:.4f}\tVal Loss: {:.4f}\tVal Distance: {:.4f}\tVal Perplexity: {:.4f}'.format(
             train_loss, train_distance, train_perplexity_loss, val_loss, val_distance, val_perplexity_loss), f=f)
         
-        # add log to tensorboard
-        # 4. Log scalar values (scalar summary)
-        vr_info = { 'train_loss': train_loss, 'train_perplexity': train_perplexity_loss, 'train_distance': train_distance,'val_loss': val_loss, 'val_perplexity': val_perplexity_loss, 'val_distance': val_distance }
+        if vLog is not None:
+            # add log to tensorboard
+            # 4. Log scalar values (scalar summary)
+            vr_info = { 'train_loss': train_loss, 'train_perplexity': train_perplexity_loss, 'train_distance': train_distance,'val_loss': val_loss, 'val_perplexity': val_perplexity_loss, 'val_distance': val_distance }
 
-        for tag, value in vr_info.items():
-            vLog.add_scalar(tag, value, global_iteration_index+1)
+            for tag, value in vr_info.items():
+                vLog.add_scalar(tag, value, global_iteration_index+1)
 
         if scheduler is not None:
             # update loss on scheduer
@@ -544,7 +549,8 @@ def inference(model, test_dataloader,language_model, MAX_SEQ_LEN=500):
     model.eval()
     num_batches = len(test_dataloader)
     inferences = []
-    for idx,  data_batch in enumerate(test_dataloader):
+    dataloader = tqdm(test_dataloader, total=len(test_dataloader))
+    for idx,  data_batch in enumerate(dataloader):
         predictions, prediction_labels, _, reverse_sequence_order = model(
             data_batch, TEACHER_FORCING_Ratio=None, TEST=True, VALIDATE=False, NUM_CONFIG=MAX_SEQ_LEN, SEARCH_MODE='greedy')  # N, max_label_L, vocab_size; N, max_label_L; with grad; predict till EOS; NUM_CONFIG == MAX_SEQ_LEN
         
@@ -576,7 +582,8 @@ def inference_random_search(model, test_dataloader, language_model, validation_c
     model.eval()
     num_batches = len(test_dataloader)
     inferences = []
-    for idx,  data_batch in enumerate(test_dataloader):
+    dataloader = tqdm(test_dataloader, total=len(test_dataloader))
+    for idx,  data_batch in enumerate(dataloader):
         candidate_y_hats, candidate_labels, sequence_order, reverse_sequence_order = model(
             data_batch, TEACHER_FORCING_Ratio=0, TEST=True, VALIDATE=False, NUM_CONFIG=(MAX_SEQ_LEN, N_CANDIDATES, GUMBEL_T), SEARCH_MODE='random')
         # N_candidates, batch_size, max_label_lens (vary in different try same within each try), vocab_size; N_candidates, batch_size, max_label_lens; NUM_CONFIG = (MAX_SEQ_LEN, N_CANDIDATES)
@@ -638,7 +645,8 @@ def inference_beam_search(model, test_dataloader,language_model, MAX_SEQ_LEN=500
     model.eval()
     num_batches = len(test_dataloader)
     inferences = []
-    for idx,  data_batch in enumerate(test_dataloader):
+    dataloader = tqdm(test_dataloader, total=len(test_dataloader))
+    for idx,  data_batch in enumerate(dataloader):
         predictions, prediction_labels, _, reverse_sequence_order = model(
             data_batch, TEACHER_FORCING_Ratio=None, TEST=True, VALIDATE=False, NUM_CONFIG=(MAX_SEQ_LEN, beam_size, num_candidates), SEARCH_MODE='beam_search')  # N, max_label_L, vocab_size; N, max_label_L; with grad; predict till EOS; NUM_CONFIG == MAX_SEQ_LEN
         

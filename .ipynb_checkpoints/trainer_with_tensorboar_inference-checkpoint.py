@@ -138,23 +138,24 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
                 # plot attention
                 plot_single_attention(batch_attention[0].squeeze(0).cpu().numpy(), epoch, os.path.join(output_path, 'attention_plots'))
                 
-                # add log to tensorboard
-                # 1. Log scalar values (scalar summary)
-                tr_info = { 'loss': loss.cpu().detach().numpy(), 'perplexity': perplexity_loss.numpy(), 'distance': distance }
+                if tLog is not None:
+                    # add log to tensorboard
+                    # 1. Log scalar values (scalar summary)
+                    tr_info = { 'loss': loss.cpu().detach().numpy(), 'perplexity': perplexity_loss.numpy(), 'distance': distance }
 
-                for tag, value in tr_info.items():
-                    tLog.add_scalar(tag, value, global_iteration_index+1)
+                    for tag, value in tr_info.items():
+                        tLog.add_scalar(tag, value, global_iteration_index+1)
 
-                # 2. Log values and gradients of the parameters (histogram summary)
-                for tag, value in model.named_parameters():
-                    tag = tag.replace('.', '/')
-                    tLog.add_histogram(tag, value.data.cpu().numpy(), global_iteration_index+1)
-                    tLog.add_histogram(tag+'/grad', value.grad.data.cpu().numpy(), global_iteration_index+1)
+                    # 2. Log values and gradients of the parameters (histogram summary)
+                    for tag, value in model.named_parameters():
+                        tag = tag.replace('.', '/')
+                        tLog.add_histogram(tag, value.data.cpu().numpy(), global_iteration_index+1)
+                        tLog.add_histogram(tag+'/grad', value.grad.data.cpu().numpy(), global_iteration_index+1)
 
-                # 3. Log two visualizations
-                tLog.add_figure('attention_last_instance_batch', plot_single_attention_return(batch_attention[0].squeeze(0).cpu().numpy()), global_step=global_iteration_index+1)
-                tLog.add_figure('gradient_flow_batch', plot_grad_flow_return(model.named_parameters()), global_step=global_iteration_index+1)
-            global_iteration_index += 1
+                    # 3. Log two visualizations
+                    tLog.add_figure('attention_last_instance_batch', plot_single_attention_return(batch_attention[0].squeeze(0).cpu().numpy()), global_step=global_iteration_index+1)
+                    tLog.add_figure('gradient_flow_batch', plot_grad_flow_return(model.named_parameters()), global_step=global_iteration_index+1)
+                global_iteration_index += 1
 
             if idx % 100 == 99:
                 print_file_and_screen('Epoch: {}\tBatch: {}\tAvg-Loss: {:.4f}\tAvg-Perplexity: {:.4f}\tAvg-Distance: {:.4f}'.format(
@@ -182,12 +183,13 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
         print_file_and_screen('Train Loss: {:.4f}\tTrain Distance: {:.4f}\tTrain Perplexity: {:.4f}\tVal Loss: {:.4f}\tVal Distance: {:.4f}\tVal Perplexity: {:.4f}'.format(
             train_loss, train_distance, train_perplexity_loss, val_loss, val_distance, val_perplexity_loss), f=f)
         
-        # add log to tensorboard
-        # 4. Log scalar values (scalar summary)
-        vr_info = { 'train_loss': train_loss, 'train_perplexity': train_perplexity_loss, 'train_distance': train_distance,'val_loss': val_loss, 'val_perplexity': val_perplexity_loss, 'val_distance': val_distance }
+        if vLog is not None:
+            # add log to tensorboard
+            # 4. Log scalar values (scalar summary)
+            vr_info = { 'train_loss': train_loss, 'train_perplexity': train_perplexity_loss, 'train_distance': train_distance,'val_loss': val_loss, 'val_perplexity': val_perplexity_loss, 'val_distance': val_distance }
 
-        for tag, value in vr_info.items():
-            vLog.add_scalar(tag, value, global_iteration_index+1)
+            for tag, value in vr_info.items():
+                vLog.add_scalar(tag, value, global_iteration_index+1)
 
         if scheduler is not None:
             # update loss on scheduer

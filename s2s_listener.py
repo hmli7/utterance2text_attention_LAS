@@ -68,19 +68,22 @@ class pBLSTM(nn.Module):
 
     def __init__(self, input_dim, hidden_size):
         super(pBLSTM, self).__init__()
-        self.lstm = nn.LSTM(
+        
+        lstm = nn.LSTM(
             input_size=input_dim*2, hidden_size=hidden_size, num_layers=1, bidirectional=True)
+        self.dropped_lstm = WeightDrop(lstm, ['weight_hh_l0','weight_hh_l0_reverse'],
+                              dropout=0.1, variational=True)
         self.locked_dropout = LockedDropout()
 
     def forward(self, x):
         # unpack
         x, sorted_sequence_lens = pad_packed_sequence(x)  # L, B, F
-        x = self.locked_dropout(x, dropout=0.2) # L, N, H
         seq_length, batch_size, feature_dim = x.size()
 
         # change original sequence lengths
         x = x[:(seq_length//2)*2]
         sorted_sequence_lens = sorted_sequence_lens//2
+        x = self.locked_dropout(x, dropout=.05) # L, N, H
 
         # reduce the timestep by 2
         x = x.permute(1, 0, 2)  # L, B, F -> B, L, F
@@ -89,4 +92,4 @@ class pBLSTM(nn.Module):
 #         x = pad_sequence(x)
         # pack
         x = pack_padded_sequence(x.permute(1,0,2), sorted_sequence_lens)
-        return self.lstm(x)
+        return self.dropped_lstm(x)
