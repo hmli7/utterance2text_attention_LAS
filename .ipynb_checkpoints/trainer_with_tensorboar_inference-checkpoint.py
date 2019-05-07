@@ -23,6 +23,8 @@ import pdb
 import OneStepBeam
 import multiprocessing as m
 
+from tqdm import tqdm
+
 
 def run(model, optimizer, criterion, validation_criterion, train_dataloader, valid_dataloader, language_model, best_epoch, best_vali_loss, DEVICE, tLog, vLog, teacher_forcing_scheduler, scheduler=None, start_epoch=None, model_prefix=config.model_prefix, NUM_CONFIG=0, TRAIN_SEARCH_MODE='greedy', output_path=None):
     best_eval = None
@@ -56,8 +58,9 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
         # update teacher forcing ratio
         TEACHER_FORCING_Ratio = teacher_forcing_scheduler.get_rate(epoch)
         
+        dataloader = tqdm(train_dataloader, total=len(train_dataloader))
         # lists, presorted, preloaded on GPU
-        for idx, (data_batch, label_batch) in enumerate(train_dataloader):
+        for idx, (data_batch, label_batch) in enumerate(dataloader):
             optimizer.zero_grad()
             predictions, prediction_labels, sorted_labels, labels_lens, batch_attention = model(
                 (data_batch, label_batch), TEACHER_FORCING_Ratio, TEST=False, NUM_CONFIG=NUM_CONFIG, SEARCH_MODE=TRAIN_SEARCH_MODE)  # N, max_label_L, vocab_size; N, max_label_L
@@ -175,9 +178,10 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             del predictions
             del loss, batch_loss
             torch.cuda.empty_cache()
-
-        train_loss, train_distance, train_perplexity_loss = test_validation(
-            model, validation_criterion, train_dataloader, language_model, DEVICE)
+        # remove training set validation
+        train_loss, train_distance, train_perplexity_loss = 0, 0, 0
+#         train_loss, train_distance, train_perplexity_loss = test_validation(
+#             model, validation_criterion, train_dataloader, language_model, DEVICE)
         val_loss, val_distance, val_perplexity_loss = test_validation(
             model, validation_criterion, valid_dataloader, language_model, DEVICE)
         print_file_and_screen('Train Loss: {:.4f}\tTrain Distance: {:.4f}\tTrain Perplexity: {:.4f}\tVal Loss: {:.4f}\tVal Distance: {:.4f}\tVal Perplexity: {:.4f}'.format(
@@ -546,7 +550,8 @@ def inference(model, test_dataloader,language_model, MAX_SEQ_LEN=500):
     model.eval()
     num_batches = len(test_dataloader)
     inferences = []
-    for idx,  data_batch in enumerate(test_dataloader):
+    dataloader = tqdm(test_dataloader, total=len(test_dataloader))
+    for idx,  data_batch in enumerate(dataloader):
         predictions, prediction_labels, _, reverse_sequence_order = model(
             data_batch, TEACHER_FORCING_Ratio=None, TEST=True, VALIDATE=False, NUM_CONFIG=MAX_SEQ_LEN, SEARCH_MODE='greedy')  # N, max_label_L, vocab_size; N, max_label_L; with grad; predict till EOS; NUM_CONFIG == MAX_SEQ_LEN
         
@@ -578,7 +583,8 @@ def inference_random_search(model, test_dataloader, language_model, validation_c
     model.eval()
     num_batches = len(test_dataloader)
     inferences = []
-    for idx,  data_batch in enumerate(test_dataloader):
+    dataloader = tqdm(test_dataloader, total=len(test_dataloader))
+    for idx,  data_batch in enumerate(dataloader):
         candidate_y_hats, candidate_labels, sequence_order, reverse_sequence_order = model(
             data_batch, TEACHER_FORCING_Ratio=0, TEST=True, VALIDATE=False, NUM_CONFIG=(MAX_SEQ_LEN, N_CANDIDATES, GUMBEL_T), SEARCH_MODE='random')
         # N_candidates, batch_size, max_label_lens (vary in different try same within each try), vocab_size; N_candidates, batch_size, max_label_lens; NUM_CONFIG = (MAX_SEQ_LEN, N_CANDIDATES)
@@ -640,7 +646,8 @@ def inference_beam_search(model, test_dataloader,language_model, MAX_SEQ_LEN=500
     model.eval()
     num_batches = len(test_dataloader)
     inferences = []
-    for idx,  data_batch in enumerate(test_dataloader):
+    dataloader = tqdm(test_dataloader, total=len(test_dataloader))
+    for idx,  data_batch in enumerate(dataloader):
         predictions, prediction_labels, _, reverse_sequence_order = model(
             data_batch, TEACHER_FORCING_Ratio=None, TEST=True, VALIDATE=False, NUM_CONFIG=(MAX_SEQ_LEN, beam_size, num_candidates), SEARCH_MODE='beam_search')  # N, max_label_L, vocab_size; N, max_label_L; with grad; predict till EOS; NUM_CONFIG == MAX_SEQ_LEN
         
@@ -703,7 +710,8 @@ def inference_fast_beam_search(model, model_reference, test_dataloader, language
 
     # three list contains total number of key, value, and sequence length for each utterance
     # do beam search with multiprocessing
-    pool = m.Pool(m.cpu_count())
+    num_of_processor = m.cpu_count()
+    pool = m.Pool(10)
     results = pool.map(one_step_beam.do_one_step, zip(
         all_keys, all_values, all_sequence_lens))  # [[y_hat, decoded_prediction, attention]]
 

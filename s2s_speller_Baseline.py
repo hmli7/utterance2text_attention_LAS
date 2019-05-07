@@ -111,7 +111,7 @@ class Decoder_RNN(nn.Module):
 
         # weight tying
         self.embedding.weight = self.mlp.fc2.weight
-        self.embedding.bias = self.mlp.fc2.bias
+#         self.embedding.bias = self.mlp.fc2.bias
 
     def detach_states(self):
         '''detach states initiated in the beginning after each batch'''

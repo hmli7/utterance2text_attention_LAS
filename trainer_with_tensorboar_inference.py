@@ -178,9 +178,10 @@ def run(model, optimizer, criterion, validation_criterion, train_dataloader, val
             del predictions
             del loss, batch_loss
             torch.cuda.empty_cache()
-
-        train_loss, train_distance, train_perplexity_loss = test_validation(
-            model, validation_criterion, train_dataloader, language_model, DEVICE)
+        # remove training set validation
+        train_loss, train_distance, train_perplexity_loss = 0, 0, 0
+#         train_loss, train_distance, train_perplexity_loss = test_validation(
+#             model, validation_criterion, train_dataloader, language_model, DEVICE)
         val_loss, val_distance, val_perplexity_loss = test_validation(
             model, validation_criterion, valid_dataloader, language_model, DEVICE)
         print_file_and_screen('Train Loss: {:.4f}\tTrain Distance: {:.4f}\tTrain Perplexity: {:.4f}\tVal Loss: {:.4f}\tVal Distance: {:.4f}\tVal Perplexity: {:.4f}'.format(
@@ -709,7 +710,8 @@ def inference_fast_beam_search(model, model_reference, test_dataloader, language
 
     # three list contains total number of key, value, and sequence length for each utterance
     # do beam search with multiprocessing
-    pool = m.Pool(m.cpu_count())
+    num_of_processor = m.cpu_count()
+    pool = m.Pool(10)
     results = pool.map(one_step_beam.do_one_step, zip(
         all_keys, all_values, all_sequence_lens))  # [[y_hat, decoded_prediction, attention]]
 

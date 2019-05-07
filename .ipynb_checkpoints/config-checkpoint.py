@@ -10,7 +10,7 @@ lr = 0.001
 weight_decay = 0.0001
 batch_size = 32
 test_batch_size = 64
-max_epoch = 20
+max_epoch = 40
 start_epoch = 0
 
 # scheduler

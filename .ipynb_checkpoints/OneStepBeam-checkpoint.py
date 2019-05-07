@@ -36,5 +36,6 @@ class OneStepBeam:
                 pred = y_hat_label
         else:
             pred = y_hat_label  # if no EOS, use the entire prediction
+        decoded_pred = language_model.indexes2string(pred)
 
-        return pred
+        return decoded_pred
